@@ -11,6 +11,7 @@ import {
   goalPlanProgress,
   reviseGoalPlan,
 } from "./goal-plan"
+import { withStateLock } from "./state-lock"
 import { statePath } from "./state-path"
 
 export { statePath } from "./state-path"
@@ -470,16 +471,16 @@ function readStateResultEffect(file = statePath()) {
   }).pipe(
     Effect.flatMap((raw) =>
       Effect.try({
-        try: () => parseStateText(raw, file),
+        try: () => ({ ...parseStateText(raw, file), raw }),
         catch: (cause) => new StateDecodeError({ cause }),
       }),
     ),
-    Effect.flatMap(({ value, recoveryContent }) =>
-      decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent }))),
+    Effect.flatMap(({ value, recoveryContent, raw }) =>
+      decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent, raw }))),
     ),
     Effect.catchAll((error) =>
       error._tag === "StateReadError" && isMissingStateFile(error.cause)
-        ? Effect.succeed({ state: emptyState(), recoveryContent: null })
+        ? Effect.succeed({ state: emptyState(), recoveryContent: null, raw: null })
         : Effect.fail(error),
     ),
   )
@@ -522,6 +523,10 @@ function verifyRecoverySourceEffect(file: string, expectedContent: string, quara
   })
 }
 
+function serializeState(state: State) {
+  return JSON.stringify(state, null, 2) + "\n"
+}
+
 function writeStateEffect(state: State, file = statePath()) {
   return Effect.tryPromise({
     try: async () => {
@@ -536,7 +541,7 @@ function writeStateEffect(state: State, file = statePath()) {
       // the rename so the rename itself survives a crash; where it does not
       // (Windows / some filesystems) the write still succeeds and a crash
       // leaves either the old or the new valid state, never a torn file.
-      await atomicWriteFile(file, JSON.stringify(state, null, 2) + "\n")
+      await atomicWriteFile(file, serializeState(state))
     },
     catch: (cause) => new StateWriteError({ cause }),
   })
@@ -570,70 +575,92 @@ function enqueueMutation<T>(operation: () => Promise<T>) {
   return current
 }
 
+function ensureStateDirEffect(file: string) {
+  return Effect.tryPromise({
+    try: () => mkdir(dirname(file), { recursive: true, mode: 0o700 }),
+    catch: (cause) => new StateWriteError({ cause }),
+  })
+}
+
+// The mutation queue serializes writers inside this process; the state lock
+// serializes them across OpenCode processes sharing the same state file, so a
+// read -> modify -> write can never be interleaved with another process's.
 async function mutate<T>(fn: (state: State) => T | Promise<T>) {
-  return enqueueMutation(() => {
+  return enqueueMutation(async () => {
     const file = statePath()
-    return Effect.runPromise(
-      Effect.gen(function* () {
-        const { state, recoveryContent } = yield* readStateResultEffect(file)
-        const result = yield* Effect.tryPromise({
-          try: () => Promise.resolve(fn(state)),
-          catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
-        })
-        if (recoveryContent != null) {
-          const quarantine = yield* quarantineStateEffect(file, recoveryContent)
-          if (quarantine.error != null) {
-            const notice: StateRecoveryNotice = {
-              stateFile: file,
-              quarantineFile: quarantine.quarantineFile,
-              outcome: "quarantineFailed",
-              error: quarantine.error,
-            }
-            try {
-              console.error(
-                `[opencode-goal-plugin] Could not quarantine corrupt state at ${file}; continuing recovery:`,
-                quarantine.error,
-              )
-            } catch {
-              // Diagnostics must never block state recovery.
-            }
-            notifyStateRecovery(notice)
-          } else {
-            const unchanged = yield* verifyRecoverySourceEffect(
-              file,
-              recoveryContent,
-              quarantine.quarantineFile,
+    await Effect.runPromise(ensureStateDirEffect(file))
+    return withStateLock(file, () => runMutation(file, fn))
+  })
+}
+
+function runMutation<T>(file: string, fn: (state: State) => T | Promise<T>) {
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const { state, recoveryContent, raw } = yield* readStateResultEffect(file)
+      const result = yield* Effect.tryPromise({
+        try: () => Promise.resolve(fn(state)),
+        catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+      })
+      if (recoveryContent != null) {
+        const quarantine = yield* quarantineStateEffect(file, recoveryContent)
+        if (quarantine.error != null) {
+          const notice: StateRecoveryNotice = {
+            stateFile: file,
+            quarantineFile: quarantine.quarantineFile,
+            outcome: "quarantineFailed",
+            error: quarantine.error,
+          }
+          try {
+            console.error(
+              `[opencode-goal-plugin] Could not quarantine corrupt state at ${file}; continuing recovery:`,
+              quarantine.error,
             )
-            if (!unchanged) {
-              const message =
-                "goal state changed while recovery was being quarantined; refusing to overwrite it"
-              notifyStateRecovery({
-                stateFile: file,
-                quarantineFile: quarantine.quarantineFile,
-                outcome: "sourceChanged",
-                error: message,
-              })
-              return yield* Effect.fail(new StateWriteError({ cause: new Error(message) }))
-            }
-            try {
-              console.warn(
-                `[opencode-goal-plugin] Preserved corrupt state from ${file} at ${quarantine.quarantineFile}; continuing recovery.`,
-              )
-            } catch {
-              // Diagnostics must never block state recovery.
-            }
+          } catch {
+            // Diagnostics must never block state recovery.
+          }
+          notifyStateRecovery(notice)
+        } else {
+          const unchanged = yield* verifyRecoverySourceEffect(
+            file,
+            recoveryContent,
+            quarantine.quarantineFile,
+          )
+          if (!unchanged) {
+            const message =
+              "goal state changed while recovery was being quarantined; refusing to overwrite it"
             notifyStateRecovery({
               stateFile: file,
               quarantineFile: quarantine.quarantineFile,
-              outcome: "quarantined",
+              outcome: "sourceChanged",
+              error: message,
             })
+            return yield* Effect.fail(new StateWriteError({ cause: new Error(message) }))
           }
+          try {
+            console.warn(
+              `[opencode-goal-plugin] Preserved corrupt state from ${file} at ${quarantine.quarantineFile}; continuing recovery.`,
+            )
+          } catch {
+            // Diagnostics must never block state recovery.
+          }
+          notifyStateRecovery({
+            stateFile: file,
+            quarantineFile: quarantine.quarantineFile,
+            outcome: "quarantined",
+          })
         }
+      }
+      // Skip the write when the file already holds exactly this state (e.g.
+      // events for sessions without a goal), so no-op mutations do not rewrite
+      // the shared file. Read-time migrations still change the bytes and are
+      // persisted. A missing file counts as holding the empty state.
+      const onDisk = raw ?? serializeState(emptyState())
+      if (recoveryContent != null || serializeState(state) !== onDisk) {
         yield* writeStateEffect(state, file)
-        return result
-      }),
-    )
-  })
+      }
+      return result
+    }),
+  )
 }
 
 export const DEFAULT_MAX_OBJECTIVE_CHARS = 100_000

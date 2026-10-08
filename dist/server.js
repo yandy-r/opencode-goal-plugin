@@ -823,8 +823,8 @@ Preserve the goal objective, status, elapsed time, budget usage, latest checkpoi
 }
 
 // src/state.ts
-import { randomUUID as randomUUID2 } from "crypto";
-import { mkdir, readFile } from "fs/promises";
+import { randomUUID as randomUUID3 } from "crypto";
+import { mkdir, readFile as readFile2 } from "fs/promises";
 import { dirname as dirname2 } from "path";
 import { Data, Effect, Schema } from "effect-goal-state";
 
@@ -933,6 +933,139 @@ async function atomicWriteFile(file, data, ops = defaultAtomicWriteOps) {
     if (created && !renamed)
       await bestEffort(() => ops.unlink(tmp));
     throw error;
+  }
+}
+
+// src/state-lock.ts
+import { randomUUID as randomUUID2 } from "crypto";
+import { link, open as open2, readFile, rename as rename2, stat, unlink as unlink2, utimes } from "fs/promises";
+
+class StateLockTimeoutError extends Error {
+  constructor(lockFile, timeoutMs) {
+    super(`timed out after ${timeoutMs}ms waiting for goal state lock ${lockFile}`);
+    this.name = "StateLockTimeoutError";
+  }
+}
+var DEFAULT_STALE_MS = 1e4;
+var DEFAULT_TIMEOUT_MS = 30000;
+var DEFAULT_RETRY_MS = 25;
+function errorCode(error) {
+  return typeof error === "object" && error !== null ? error.code : undefined;
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function tryCreateLock(lockFile, token) {
+  try {
+    const handle = await open2(lockFile, "wx", 384);
+    try {
+      await handle.writeFile(token);
+    } finally {
+      await handle.close();
+    }
+    return true;
+  } catch (error) {
+    if (errorCode(error) === "EEXIST")
+      return false;
+    throw error;
+  }
+}
+async function readToken(file) {
+  try {
+    return await readFile(file, "utf8");
+  } catch (error) {
+    if (errorCode(error) === "ENOENT")
+      return null;
+    throw error;
+  }
+}
+async function breakStaleLock(lockFile, staleToken) {
+  const aside = `${lockFile}.stale-${randomUUID2()}`;
+  try {
+    await rename2(lockFile, aside);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT")
+      return;
+    throw error;
+  }
+  const token = await readToken(aside);
+  if (token !== staleToken) {
+    try {
+      await link(aside, lockFile);
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST")
+        throw error;
+    }
+  }
+  await unlink2(aside).catch(() => {
+    return;
+  });
+}
+async function staleLockToken(lockFile, staleMs) {
+  try {
+    const info = await stat(lockFile);
+    if (Date.now() - info.mtimeMs <= staleMs)
+      return null;
+    return await readToken(lockFile);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT")
+      return null;
+    throw error;
+  }
+}
+async function acquireStateLock(lockFile, options) {
+  const token = `${process.pid}:${randomUUID2()}`;
+  const deadline = Date.now() + options.timeoutMs;
+  while (true) {
+    if (await tryCreateLock(lockFile, token))
+      return token;
+    const staleToken = await staleLockToken(lockFile, options.staleMs);
+    if (staleToken != null) {
+      await breakStaleLock(lockFile, staleToken);
+      continue;
+    }
+    if (Date.now() >= deadline)
+      throw new StateLockTimeoutError(lockFile, options.timeoutMs);
+    await sleep(options.retryMs);
+  }
+}
+async function releaseStateLock(lockFile, token) {
+  try {
+    if (await readToken(lockFile) !== token)
+      return;
+    await unlink2(lockFile);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT")
+      return;
+    try {
+      console.error(`[opencode-goal-plugin] Could not release goal state lock ${lockFile}; it will expire as stale:`, error instanceof Error ? error.message : String(error));
+    } catch {}
+  }
+}
+function startHeartbeat(lockFile, staleMs) {
+  const timer = setInterval(() => {
+    const now = new Date;
+    utimes(lockFile, now, now).catch(() => {
+      return;
+    });
+  }, Math.max(1, Math.floor(staleMs / 3)));
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+async function withStateLock(stateFile, operation, options = {}) {
+  const resolved = {
+    staleMs: options.staleMs ?? DEFAULT_STALE_MS,
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    retryMs: options.retryMs ?? DEFAULT_RETRY_MS
+  };
+  const lockFile = `${stateFile}.lock`;
+  const token = await acquireStateLock(lockFile, resolved);
+  const stopHeartbeat = startHeartbeat(lockFile, resolved.staleMs);
+  try {
+    return await operation();
+  } finally {
+    stopHeartbeat();
+    await releaseStateLock(lockFile, token);
   }
 }
 
@@ -1125,19 +1258,19 @@ function decodeState(value) {
 }
 function readStateResultEffect(file = statePath()) {
   return Effect.tryPromise({
-    try: () => readFile(file, "utf8"),
+    try: () => readFile2(file, "utf8"),
     catch: (cause) => new StateReadError({ cause })
   }).pipe(Effect.flatMap((raw) => Effect.try({
-    try: () => parseStateText(raw, file),
+    try: () => ({ ...parseStateText(raw, file), raw }),
     catch: (cause) => new StateDecodeError({ cause })
-  })), Effect.flatMap(({ value, recoveryContent }) => decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent })))), Effect.catchAll((error) => error._tag === "StateReadError" && isMissingStateFile(error.cause) ? Effect.succeed({ state: emptyState(), recoveryContent: null }) : Effect.fail(error)));
+  })), Effect.flatMap(({ value, recoveryContent, raw }) => decodeState(value).pipe(Effect.map((state) => ({ state, recoveryContent, raw })))), Effect.catchAll((error) => error._tag === "StateReadError" && isMissingStateFile(error.cause) ? Effect.succeed({ state: emptyState(), recoveryContent: null, raw: null }) : Effect.fail(error)));
 }
 function readStateEffect(file = statePath()) {
   return readStateResultEffect(file).pipe(Effect.map(({ state }) => state));
 }
 function quarantineStateEffect(file, content) {
   return Effect.promise(async () => {
-    const quarantineFile = `${file}.corrupt-${Date.now()}-${randomUUID2()}`;
+    const quarantineFile = `${file}.corrupt-${Date.now()}-${randomUUID3()}`;
     try {
       await mkdir(dirname2(file), { recursive: true, mode: 448 });
       await atomicWriteFile(quarantineFile, content);
@@ -1150,7 +1283,7 @@ function quarantineStateEffect(file, content) {
 function verifyRecoverySourceEffect(file, expectedContent, quarantineFile) {
   return Effect.promise(async () => {
     try {
-      return await readFile(file, "utf8") === expectedContent;
+      return await readFile2(file, "utf8") === expectedContent;
     } catch (error) {
       if (!isMissingStateFile(error)) {
         try {
@@ -1161,12 +1294,15 @@ function verifyRecoverySourceEffect(file, expectedContent, quarantineFile) {
     }
   });
 }
+function serializeState(state) {
+  return JSON.stringify(state, null, 2) + `
+`;
+}
 function writeStateEffect(state, file = statePath()) {
   return Effect.tryPromise({
     try: async () => {
       await mkdir(dirname2(file), { recursive: true, mode: 448 });
-      await atomicWriteFile(file, JSON.stringify(state, null, 2) + `
-`);
+      await atomicWriteFile(file, serializeState(state));
     },
     catch: (cause) => new StateWriteError({ cause })
   });
@@ -1184,54 +1320,67 @@ function enqueueMutation(operation) {
   });
   return current;
 }
+function ensureStateDirEffect(file) {
+  return Effect.tryPromise({
+    try: () => mkdir(dirname2(file), { recursive: true, mode: 448 }),
+    catch: (cause) => new StateWriteError({ cause })
+  });
+}
 async function mutate(fn) {
-  return enqueueMutation(() => {
+  return enqueueMutation(async () => {
     const file = statePath();
-    return Effect.runPromise(Effect.gen(function* () {
-      const { state, recoveryContent } = yield* readStateResultEffect(file);
-      const result = yield* Effect.tryPromise({
-        try: () => Promise.resolve(fn(state)),
-        catch: (cause) => cause instanceof Error ? cause : new Error(String(cause))
-      });
-      if (recoveryContent != null) {
-        const quarantine = yield* quarantineStateEffect(file, recoveryContent);
-        if (quarantine.error != null) {
-          const notice = {
-            stateFile: file,
-            quarantineFile: quarantine.quarantineFile,
-            outcome: "quarantineFailed",
-            error: quarantine.error
-          };
-          try {
-            console.error(`[opencode-goal-plugin] Could not quarantine corrupt state at ${file}; continuing recovery:`, quarantine.error);
-          } catch {}
-          notifyStateRecovery(notice);
-        } else {
-          const unchanged = yield* verifyRecoverySourceEffect(file, recoveryContent, quarantine.quarantineFile);
-          if (!unchanged) {
-            const message = "goal state changed while recovery was being quarantined; refusing to overwrite it";
-            notifyStateRecovery({
-              stateFile: file,
-              quarantineFile: quarantine.quarantineFile,
-              outcome: "sourceChanged",
-              error: message
-            });
-            return yield* Effect.fail(new StateWriteError({ cause: new Error(message) }));
-          }
-          try {
-            console.warn(`[opencode-goal-plugin] Preserved corrupt state from ${file} at ${quarantine.quarantineFile}; continuing recovery.`);
-          } catch {}
+    await Effect.runPromise(ensureStateDirEffect(file));
+    return withStateLock(file, () => runMutation(file, fn));
+  });
+}
+function runMutation(file, fn) {
+  return Effect.runPromise(Effect.gen(function* () {
+    const { state, recoveryContent, raw } = yield* readStateResultEffect(file);
+    const result = yield* Effect.tryPromise({
+      try: () => Promise.resolve(fn(state)),
+      catch: (cause) => cause instanceof Error ? cause : new Error(String(cause))
+    });
+    if (recoveryContent != null) {
+      const quarantine = yield* quarantineStateEffect(file, recoveryContent);
+      if (quarantine.error != null) {
+        const notice = {
+          stateFile: file,
+          quarantineFile: quarantine.quarantineFile,
+          outcome: "quarantineFailed",
+          error: quarantine.error
+        };
+        try {
+          console.error(`[opencode-goal-plugin] Could not quarantine corrupt state at ${file}; continuing recovery:`, quarantine.error);
+        } catch {}
+        notifyStateRecovery(notice);
+      } else {
+        const unchanged = yield* verifyRecoverySourceEffect(file, recoveryContent, quarantine.quarantineFile);
+        if (!unchanged) {
+          const message = "goal state changed while recovery was being quarantined; refusing to overwrite it";
           notifyStateRecovery({
             stateFile: file,
             quarantineFile: quarantine.quarantineFile,
-            outcome: "quarantined"
+            outcome: "sourceChanged",
+            error: message
           });
+          return yield* Effect.fail(new StateWriteError({ cause: new Error(message) }));
         }
+        try {
+          console.warn(`[opencode-goal-plugin] Preserved corrupt state from ${file} at ${quarantine.quarantineFile}; continuing recovery.`);
+        } catch {}
+        notifyStateRecovery({
+          stateFile: file,
+          quarantineFile: quarantine.quarantineFile,
+          outcome: "quarantined"
+        });
       }
+    }
+    const onDisk = raw ?? serializeState(emptyState());
+    if (recoveryContent != null || serializeState(state) !== onDisk) {
       yield* writeStateEffect(state, file);
-      return result;
-    }));
-  });
+    }
+    return result;
+  }));
 }
 var DEFAULT_MAX_OBJECTIVE_CHARS = 1e5;
 function resolveMaxObjectiveChars(value) {
@@ -1466,7 +1615,7 @@ async function getGoalInternal(sessionID) {
 function createGoalRecord(sessionID, objective, normalizedOptions, now = nowSeconds()) {
   const paused = normalizedOptions.initialStatus === "paused";
   const goal = {
-    id: randomUUID2(),
+    id: randomUUID3(),
     sessionID,
     objective,
     plan: null,
