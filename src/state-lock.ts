@@ -183,6 +183,8 @@ async function releaseStateLock(
     })
     if (!released) throw new Error("timed out waiting for the lock break guard")
   } catch (error) {
+    // The lock's directory is gone, so there is no lock left to release.
+    if (errorCode(error) === "ENOENT") return
     try {
       console.error(
         `[opencode-goal-plugin] Could not release goal state lock ${lockFile}; it will expire as stale:`,

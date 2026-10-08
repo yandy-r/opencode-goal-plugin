@@ -1070,6 +1070,8 @@ async function releaseStateLock(lockFile, token, options) {
     if (!released)
       throw new Error("timed out waiting for the lock break guard");
   } catch (error) {
+    if (errorCode(error) === "ENOENT")
+      return;
     try {
       console.error(`[opencode-goal-plugin] Could not release goal state lock ${lockFile}; it will expire as stale:`, error instanceof Error ? error.message : String(error));
     } catch {}
