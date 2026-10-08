@@ -295,7 +295,7 @@ verify an exact published package in the isolated environment.
 
 ## Publishing
 
-This package is set up for npm Trusted Publishing from GitHub Actions. On every push to `main`, CI runs typecheck, lint, and unit tests in parallel. If they all pass, the publish job computes the next patch version from the latest version on npm, builds the package, and runs `npm publish`.
+Branching and release rules live in [`RELEASING.md`](RELEASING.md). This package is set up for npm Trusted Publishing from GitHub Actions. On every push to `main`, CI runs typecheck, lint, and unit tests in parallel. If they all pass, the publish job computes the next patch version from the latest version on npm, builds the package, and runs `npm publish`.
 
 Before the first automated publish, configure the package on npm:
 

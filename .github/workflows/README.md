@@ -15,7 +15,7 @@ Releases are continuous: every merge to `main` publishes. See [`RELEASING.md`](.
 Re-run a failed release with `gh workflow run publish.yml --ref main`
 (`publish.yml` declares `workflow_dispatch`).
 
-**Secrets/permissions:** npm publishing uses the repository's configured npm auth (trusted
+**Secrets/permissions:** npm Trusted Publishing via `id-token: write` (no npm token secret needed); `GITHUB_TOKEN` creates the release.
 publishing via `id-token: write` or an `NPM_TOKEN` secret); `GITHUB_TOKEN` creates the release.
 
 **Local reproduction:** `bun install --frozen-lockfile && bun run typecheck && bun run lint && bun run test && bun run build`.
