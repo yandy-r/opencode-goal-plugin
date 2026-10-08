@@ -13,9 +13,9 @@ import { open, readFile, stat, unlink, utimes } from "node:fs/promises"
  * The lock is a file created with `O_EXCL` that holds a unique token. While it
  * is held, its mtime is refreshed on a heartbeat, so a lock whose mtime is older
  * than `staleMs` belongs to a holder that died (or stalled) without releasing
- * it and may be broken. Breakers are serialized through a second short-lived
- * `O_EXCL` guard and re-check the token under it, so two waiters can never
- * both break and re-take the lock. A holder that stalled past `staleMs` finds
+ * it and may be broken. Breaking and releasing are serialized through a second
+ * short-lived `O_EXCL` guard and re-check the lock under it, so a lock is never
+ * removed out from under a holder that just took it. A holder that stalled past `staleMs` finds
  * out through `assertHeld()` before it writes.
  */
 
@@ -73,9 +73,13 @@ async function tryCreateExclusive(file: string, token: string) {
     const handle = await open(file, "wx", 0o600)
     try {
       await handle.writeFile(token)
-    } finally {
-      await handle.close()
+    } catch (error) {
+      // An empty file nobody owns would block everyone until it went stale.
+      await handle.close().catch(() => undefined)
+      await unlink(file).catch(() => undefined)
+      throw error
     }
+    await handle.close()
     return true
   } catch (error) {
     if (errorCode(error) === "EEXIST" || isTransientContention(error)) return false
@@ -110,25 +114,44 @@ async function isStale(file: string, staleMs: number) {
 }
 
 /**
- * Removes `lockFile` if it is still stale. Only the holder of the break guard
- * may do this, and it re-reads staleness under the guard, so a lock that was
- * released and re-taken in the meantime is left alone. A guard abandoned by a
- * breaker that died is itself removed once stale.
+ * Runs `operation` while holding `<lockFile>.break`, the guard that serializes
+ * removing the lock: stale-lock breaking and release both take it, so a breaker
+ * can never unlink a lock that its owner released and a new holder re-took in
+ * between. The guard is held for a few syscalls; one abandoned by a process
+ * that died is removed once stale. Returns false if the guard was not taken.
  */
-async function breakStaleLock(lockFile: string, staleMs: number) {
+async function withBreakGuard(
+  lockFile: string,
+  options: Required<StateLockOptions>,
+  wait: boolean,
+  operation: () => Promise<void>,
+) {
   const guard = `${lockFile}.break`
   const guardToken = randomUUID()
-  if (!(await tryCreateExclusive(guard, guardToken))) {
-    if (await isStale(guard, staleMs)) await removeIfPresent(guard)
-    return
+  const deadline = Date.now() + options.staleMs
+  while (!(await tryCreateExclusive(guard, guardToken))) {
+    if (await isStale(guard, options.staleMs)) {
+      await removeIfPresent(guard)
+      continue
+    }
+    if (!wait || Date.now() >= deadline) return false
+    await sleep(options.retryMs)
   }
   try {
-    if (await isStale(lockFile, staleMs)) await removeIfPresent(lockFile)
+    await operation()
   } finally {
     if ((await readToken(guard).catch(() => null)) === guardToken) {
       await removeIfPresent(guard).catch(() => undefined)
     }
   }
+  return true
+}
+
+/** Removes `lockFile` if it is still stale, re-checked under the break guard. */
+async function breakStaleLock(lockFile: string, options: Required<StateLockOptions>) {
+  await withBreakGuard(lockFile, options, false, async () => {
+    if (await isStale(lockFile, options.staleMs)) await removeIfPresent(lockFile)
+  })
 }
 
 async function acquireStateLock(lockFile: string, options: Required<StateLockOptions>) {
@@ -137,21 +160,28 @@ async function acquireStateLock(lockFile: string, options: Required<StateLockOpt
   while (true) {
     if (await tryCreateExclusive(lockFile, token)) return token
     if (await isStale(lockFile, options.staleMs)) {
-      await breakStaleLock(lockFile, options.staleMs)
-      continue
+      await breakStaleLock(lockFile, options)
+      if (await tryCreateExclusive(lockFile, token)) return token
     }
     if (Date.now() >= deadline) throw new StateLockTimeoutError(lockFile, options.timeoutMs)
     await sleep(options.retryMs)
   }
 }
 
-async function releaseStateLock(lockFile: string, token: string) {
+async function releaseStateLock(
+  lockFile: string,
+  token: string,
+  options: Required<StateLockOptions>,
+) {
   // Only remove the lock if it is still ours; if it was broken as stale, a
   // different holder may own the path now. A failed release must not turn a
   // committed mutation into an error: the lock simply goes stale.
   try {
-    if ((await readToken(lockFile)) !== token) return
-    await removeIfPresent(lockFile)
+    const released = await withBreakGuard(lockFile, options, true, async () => {
+      if ((await readToken(lockFile)) !== token) return
+      await removeIfPresent(lockFile)
+    })
+    if (!released) throw new Error("timed out waiting for the lock break guard")
   } catch (error) {
     try {
       console.error(
@@ -204,6 +234,6 @@ export async function withStateLock<T>(
     return await operation(handle)
   } finally {
     stopHeartbeat()
-    await releaseStateLock(lockFile, token)
+    await releaseStateLock(lockFile, token, resolved)
   }
 }

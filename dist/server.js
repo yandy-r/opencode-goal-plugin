@@ -971,9 +971,16 @@ async function tryCreateExclusive(file, token) {
     const handle = await open2(file, "wx", 384);
     try {
       await handle.writeFile(token);
-    } finally {
-      await handle.close();
+    } catch (error) {
+      await handle.close().catch(() => {
+        return;
+      });
+      await unlink2(file).catch(() => {
+        return;
+      });
+      throw error;
     }
+    await handle.close();
     return true;
   } catch (error) {
     if (errorCode(error) === "EEXIST" || isTransientContention(error))
@@ -1007,17 +1014,21 @@ async function isStale(file, staleMs) {
     throw error;
   }
 }
-async function breakStaleLock(lockFile, staleMs) {
+async function withBreakGuard(lockFile, options, wait, operation) {
   const guard = `${lockFile}.break`;
   const guardToken = randomUUID2();
-  if (!await tryCreateExclusive(guard, guardToken)) {
-    if (await isStale(guard, staleMs))
+  const deadline = Date.now() + options.staleMs;
+  while (!await tryCreateExclusive(guard, guardToken)) {
+    if (await isStale(guard, options.staleMs)) {
       await removeIfPresent(guard);
-    return;
+      continue;
+    }
+    if (!wait || Date.now() >= deadline)
+      return false;
+    await sleep(options.retryMs);
   }
   try {
-    if (await isStale(lockFile, staleMs))
-      await removeIfPresent(lockFile);
+    await operation();
   } finally {
     if (await readToken(guard).catch(() => null) === guardToken) {
       await removeIfPresent(guard).catch(() => {
@@ -1025,6 +1036,13 @@ async function breakStaleLock(lockFile, staleMs) {
       });
     }
   }
+  return true;
+}
+async function breakStaleLock(lockFile, options) {
+  await withBreakGuard(lockFile, options, false, async () => {
+    if (await isStale(lockFile, options.staleMs))
+      await removeIfPresent(lockFile);
+  });
 }
 async function acquireStateLock(lockFile, options) {
   const token = `${process.pid}:${randomUUID2()}`;
@@ -1033,19 +1051,24 @@ async function acquireStateLock(lockFile, options) {
     if (await tryCreateExclusive(lockFile, token))
       return token;
     if (await isStale(lockFile, options.staleMs)) {
-      await breakStaleLock(lockFile, options.staleMs);
-      continue;
+      await breakStaleLock(lockFile, options);
+      if (await tryCreateExclusive(lockFile, token))
+        return token;
     }
     if (Date.now() >= deadline)
       throw new StateLockTimeoutError(lockFile, options.timeoutMs);
     await sleep(options.retryMs);
   }
 }
-async function releaseStateLock(lockFile, token) {
+async function releaseStateLock(lockFile, token, options) {
   try {
-    if (await readToken(lockFile) !== token)
-      return;
-    await removeIfPresent(lockFile);
+    const released = await withBreakGuard(lockFile, options, true, async () => {
+      if (await readToken(lockFile) !== token)
+        return;
+      await removeIfPresent(lockFile);
+    });
+    if (!released)
+      throw new Error("timed out waiting for the lock break guard");
   } catch (error) {
     try {
       console.error(`[opencode-goal-plugin] Could not release goal state lock ${lockFile}; it will expire as stale:`, error instanceof Error ? error.message : String(error));
@@ -1085,7 +1108,7 @@ async function withStateLock(stateFile, operation, options = {}) {
     return await operation(handle);
   } finally {
     stopHeartbeat();
-    await releaseStateLock(lockFile, token);
+    await releaseStateLock(lockFile, token, resolved);
   }
 }
 
