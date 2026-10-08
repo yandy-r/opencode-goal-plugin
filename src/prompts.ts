@@ -25,12 +25,19 @@ ${escapeXmlText(goal.objective)}
 </untrusted_objective>`
 }
 
+// The changes log stays out of prompts: get_goal still returns it, and it would let
+// revision reasons grow every prompt beyond the plan's own size budget.
+function planJSON(goal: GoalSnapshot) {
+  const { changes: _changes, ...plan } = goal.plan ?? {}
+  return JSON.stringify({ plan, progress: goal.planProgress })
+}
+
 function durablePlanContext(goal: GoalSnapshot) {
   return goal.plan
     ? `
 
 <untrusted_goal_plan>
-${escapeXmlText(JSON.stringify({ plan: goal.plan, progress: goal.planProgress }))}
+${escapeXmlText(planJSON(goal))}
 </untrusted_goal_plan>`
     : ""
 }
@@ -228,8 +235,7 @@ function formatCompactionSnapshot(goal: GoalSnapshot, locale: GoalLocale) {
     if (goal.stopReason) lines.push(`停止原因：${presentGoalStopReason(goal.stopReason, locale)}`)
     if (goal.completionEvidence) lines.push(`完成证据：${goal.completionEvidence}`)
     if (goal.blocker) lines.push(`阻塞原因：${presentGoalLastStatus(goal.blocker, locale)}`)
-    if (goal.plan)
-      lines.push(`计划：${JSON.stringify({ plan: goal.plan, progress: goal.planProgress })}`)
+    if (goal.plan) lines.push(`计划：${planJSON(goal)}`)
     return lines.join("\n")
   }
 
@@ -248,8 +254,7 @@ function formatCompactionSnapshot(goal: GoalSnapshot, locale: GoalLocale) {
   if (goal.stopReason) lines.push(`Stop reason: ${goal.stopReason}`)
   if (goal.completionEvidence) lines.push(`Completion evidence: ${goal.completionEvidence}`)
   if (goal.blocker) lines.push(`Blocker: ${goal.blocker}`)
-  if (goal.plan)
-    lines.push(`Plan: ${JSON.stringify({ plan: goal.plan, progress: goal.planProgress })}`)
+  if (goal.plan) lines.push(`Plan: ${planJSON(goal)}`)
   return lines.join("\n")
 }
 
