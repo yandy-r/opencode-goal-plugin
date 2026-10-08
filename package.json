@@ -1,5 +1,5 @@
 {
-  "name": "@prevalentware/opencode-goal-plugin",
+  "name": "@yandy-r/opencode-goal-plugin",
   "version": "0.1.1",
   "description": "OpenCode goal plugin that adds Codex-style long-running goal mode, /goal commands, persistence, and TUI status for AI coding agents.",
   "keywords": [
@@ -17,16 +17,16 @@
     "agent",
     "tui"
   ],
-  "homepage": "https://github.com/prevalentWare/opencode-goal-plugin#readme",
+  "homepage": "https://github.com/yandy-r/opencode-goal-plugin#readme",
   "bugs": {
-    "url": "https://github.com/prevalentWare/opencode-goal-plugin/issues"
+    "url": "https://github.com/yandy-r/opencode-goal-plugin/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/prevalentWare/opencode-goal-plugin.git"
+    "url": "git+https://github.com/yandy-r/opencode-goal-plugin.git"
   },
   "license": "MIT",
-  "author": "Prevalentware",
+  "author": "Yandy Ramirez",
   "type": "module",
   "exports": {
     "./server": {

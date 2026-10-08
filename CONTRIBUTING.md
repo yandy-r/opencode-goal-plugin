@@ -1,6 +1,6 @@
 # Contributing to OpenCode Goal Plugin
 
-Thanks for your interest in improving `@prevalentware/opencode-goal-plugin`. This guide explains how to set up the project, make changes, and get them merged.
+Thanks for your interest in improving `@yandy-r/opencode-goal-plugin`. This guide explains how to set up the project, make changes, and get them merged.
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ Thanks for your interest in improving `@prevalentware/opencode-goal-plugin`. Thi
 ## Getting started
 
 ```bash
-git clone https://github.com/prevalentWare/opencode-goal-plugin.git
+git clone https://github.com/yandy-r/opencode-goal-plugin.git
 cd opencode-goal-plugin
 bun install
 ```
@@ -51,7 +51,7 @@ Useful scripts:
 
 ## Reporting bugs and requesting features
 
-Use the [issue templates](https://github.com/prevalentWare/opencode-goal-plugin/issues/new/choose). Include your OpenCode version, plugin version, install method, and reproduction steps for bugs.
+Use the [issue templates](https://github.com/yandy-r/opencode-goal-plugin/issues/new/choose). Include your OpenCode version, plugin version, install method, and reproduction steps for bugs.
 
 For security issues, do not open a public issue — see [SECURITY.md](SECURITY.md).
 

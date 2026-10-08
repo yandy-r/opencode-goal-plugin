@@ -40,7 +40,7 @@ This repo publishes from GitHub Actions on pushes to `main`. The workflow comput
 After pushing a release change, monitor the workflow with `gh run list --branch main` and `gh run watch <run-id> --exit-status`. Verify the release and package metadata after success:
 
 ```bash
-npm view @prevalentware/opencode-goal-plugin version dependencies
+npm view @yandy-r/opencode-goal-plugin version dependencies
 gh release view v<version>
 ```
 
@@ -48,7 +48,7 @@ gh release view v<version>
 
 To test this plugin end to end, do not stop at unit tests. Run the local gates first: `bun run lint`, `bun run typecheck`, `bun run test`, `bun run build`, and `bun run pack:dry-run`.
 
-After publishing, verify the exact npm version with `npm view @prevalentware/opencode-goal-plugin version dependencies`. Install that version in an isolated temp OpenCode project with `opencode plugin @prevalentware/opencode-goal-plugin@<version>`, run `opencode debug config` to confirm the package is loaded and the `goal` command is registered, then run a smoke test with an isolated state file, for example:
+After publishing, verify the exact npm version with `npm view @yandy-r/opencode-goal-plugin version dependencies`. Install that version in an isolated temp OpenCode project with `opencode plugin @yandy-r/opencode-goal-plugin@<version>`, run `opencode debug config` to confirm the package is loaded and the `goal` command is registered, then run a smoke test with an isolated state file, for example:
 
 ```bash
 OPENCODE_GOAL_STATE_PATH="/tmp/opencode-goal-plugin-smoke/goals.json" opencode run "/goal create a smoke-test goal and then report the current goal state"
