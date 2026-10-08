@@ -2979,6 +2979,11 @@ test("V2 watchdog no-response counts a failure on idle even with auto_continue f
   )
   await waitFor(() => mock.promptCalls.length === 1, 10_000)
   expect((await getGoal("ses_v2"))?.autoTurns).toBe(0)
+  // The rescue's state write is visible before the watchdog releases its
+  // continuation claim (the state lock is released after the write). An idle
+  // that lands inside that window is dropped while auto-continue is disabled
+  // (YAN-970), so let the rescue settle before ending the busy episode.
+  await new Promise((resolve) => setTimeout(resolve, 50))
 
   // The busy episode ends with no response: the started pending attempt counts
   // exactly one unresolved failure even though auto-continue is disabled, and
