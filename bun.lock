@@ -7,7 +7,7 @@
       "dependencies": {
         "@opencode-ai/plugin": "^1.17.1",
         "effect-goal-state": "npm:effect@^3.21.2",
-        "zod": "^4.1.8",
+        "zod": "4.1.8",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.5.15",
@@ -1133,7 +1133,7 @@
 
     "yocto-queue": ["yocto-queue@0.1.0", "", {}, "sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q=="],
 
-    "zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
+    "zod": ["zod@4.1.8", "", {}, "sha512-5R1P+WwQqmmMIEACyzSvo4JXHY5WiAFHRMg+zBZKgKS+Q1viRa0C1hmUKtHltoIFKtIdki3pRxkmpP74jnNYHQ=="],
 
     "@aws-crypto/sha256-browser/@aws-sdk/types": ["@aws-sdk/types@3.974.5", "", { "dependencies": { "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-LkwLL2BLbC6wNNm4JaH9mbEqBMdOZCct6VAYqhdN4U1xrWM+fUJQEfbHwQgDypapOWTRtlk25akb5afM0P8CIQ=="],
 
@@ -1269,15 +1269,11 @@
 
     "@opencode-ai/plugin/effect": ["effect@4.0.0-beta.83", "", { "dependencies": { "@standard-schema/spec": "^1.1.0", "fast-check": "^4.8.0", "find-my-way-ts": "^0.1.6", "ini": "^7.0.0", "kubernetes-types": "^1.30.0", "msgpackr": "^2.0.1", "multipasta": "^0.2.7", "toml": "^4.1.1", "uuid": "^14.0.0", "yaml": "^2.9.0" } }, "sha512-0wsak8RtgGAr9UWSbVDgJHZcUqMSvicHcvaZv1MbMM7MCGgW4Rn/137J1MHQbwYPcwYGxT/IqehFd+UbYuj78w=="],
 
-    "@opencode-ai/plugin/zod": ["zod@4.1.8", "", {}, "sha512-5R1P+WwQqmmMIEACyzSvo4JXHY5WiAFHRMg+zBZKgKS+Q1viRa0C1hmUKtHltoIFKtIdki3pRxkmpP74jnNYHQ=="],
-
     "@opencode/client/@opencode/schema": ["@opencode/schema@2.0.23", "", { "dependencies": { "@standard-schema/spec": "1.1.0", "effect": "4.0.0-rc.112" } }, "sha512-DglA+CCNmCaiAJ8FqAKo2EKIkCOF9/EmMEYowcXhTrQcoJ7eaTx7ytGjPgis6VHQuU4aaAgwZYw96ypS3ojsIw=="],
 
     "@opencode/plugin/@opencode/client": ["@opencode/client@0.0.0-beta-19425", "", { "dependencies": { "@opencode/protocol": "0.0.0-beta-19425", "@opencode/schema": "0.0.0-beta-19425" }, "peerDependencies": { "effect": "4.0.0-rc.112", "solid-js": ">=1.9.0" }, "optionalPeers": ["effect", "solid-js"] }, "sha512-doWMGr/r8dWvl9mLbWVUpSHMfATfJy8O6Jphr17yoioAU8brxrfsuRWxHRYQnXwTiiiYduwPI6o71J8CSOKwDA=="],
 
     "@opencode/plugin/@opencode/protocol": ["@opencode/protocol@0.0.0-beta-19425", "", { "dependencies": { "@opencode/schema": "0.0.0-beta-19425", "effect": "4.0.0-rc.112" } }, "sha512-aUsuJCLHwryvyqb/5PmorVra0XDs0vL3bOP2LiO/ZkpXYCevuSwKXRS7WvKnpK6lYGt61kNDloF6pE9JEf+UeQ=="],
-
-    "@opencode/plugin/zod": ["zod@4.1.8", "", {}, "sha512-5R1P+WwQqmmMIEACyzSvo4JXHY5WiAFHRMg+zBZKgKS+Q1viRa0C1hmUKtHltoIFKtIdki3pRxkmpP74jnNYHQ=="],
 
     "@opencode/protocol/@opencode/schema": ["@opencode/schema@2.0.23", "", { "dependencies": { "@standard-schema/spec": "1.1.0", "effect": "4.0.0-rc.112" } }, "sha512-DglA+CCNmCaiAJ8FqAKo2EKIkCOF9/EmMEYowcXhTrQcoJ7eaTx7ytGjPgis6VHQuU4aaAgwZYw96ypS3ojsIw=="],
 
