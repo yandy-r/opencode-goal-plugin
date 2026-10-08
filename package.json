@@ -56,7 +56,7 @@
     "test": "bun test",
     "smoke:v2": "bun scripts/smoke-v2-lifecycle.ts",
     "test:coverage": "bun test --coverage",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node node_modules/typescript-7/bin/tsc --noEmit",
     "prepublishOnly": "bun run test && bun run build"
   },
   "dependencies": {
@@ -86,7 +86,8 @@
     "prettier": "^3.9.9",
     "semver": "^7.8.5",
     "solid-js": "1.9.15",
-    "typescript": "^7.0.2",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-7": "npm:typescript@^7.0.2",
     "typescript-eslint": "^8.59.2"
   },
   "engines": {
