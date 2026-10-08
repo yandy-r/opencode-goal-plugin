@@ -100,3 +100,9 @@ firewalled-agent environment rules, `gh` quoting conventions, and
 language-specific build/test commands (TypeScript), read
 [`CLAUDE.md`](../CLAUDE.md) and [`AGENTS.md`](../AGENTS.md) before writing
 code.
+
+## Branching & releases
+
+[`(../RELEASING.md)`](<(../RELEASING.md)>) is the source of truth for branches and releases. Branch
+off `main` and PR back into it; every release is tagged from `main`. Never merge one
+long-lived branch into another to sync it.

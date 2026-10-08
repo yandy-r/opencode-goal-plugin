@@ -118,3 +118,9 @@ bun run lint
 # Build
 bun run build
 ```
+
+## Branching & releases
+
+[`RELEASING.md`](RELEASING.md) is the source of truth for branches and releases. Branch
+off `main` and PR back into it; every release is tagged from `main`. Never merge one
+long-lived branch into another to sync it.
