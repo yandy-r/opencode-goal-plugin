@@ -23,7 +23,7 @@ const phase = z
   })
   .strict()
 
-export const GoalPlanInputSchema = z
+const planFields = z
   .object({
     summary: text,
     completionCriteria: z.array(text).min(1).max(32),
@@ -31,69 +31,81 @@ export const GoalPlanInputSchema = z
     decisions: z.array(text).max(32).default([]),
   })
   .strict()
-  .superRefine((plan, ctx) => {
-    const ids = new Set<string>()
-    let runningPhases = 0
-    let runningTasks = 0
-    for (const phase of plan.phases) {
-      if (ids.has(phase.id)) ctx.addIssue({ code: "custom", message: "plan IDs must be unique" })
-      ids.add(phase.id)
-      if (phase.status === "in_progress") runningPhases++
-      if (phase.status === "blocked" && !phase.blocker)
-        ctx.addIssue({ code: "custom", message: "blocked phases require a blocker" })
-      if (
-        phase.status === "completed" &&
-        (!phase.verification || phase.tasks.some((task) => task.status !== "completed"))
-      ) {
-        ctx.addIssue({
-          code: "custom",
-          message: "completed phases require verified tasks and phase verification",
-        })
-      }
-      for (const task of phase.tasks) {
-        if (ids.has(task.id)) ctx.addIssue({ code: "custom", message: "plan IDs must be unique" })
-        ids.add(task.id)
-        if (task.status === "completed" && !task.evidence)
-          ctx.addIssue({ code: "custom", message: "completed tasks require evidence" })
-        if (task.status === "blocked" && !task.blocker)
-          ctx.addIssue({ code: "custom", message: "blocked tasks require a blocker" })
-        if (task.status === "in_progress") {
-          runningTasks++
-          if (phase.status !== "in_progress")
-            ctx.addIssue({ code: "custom", message: "running tasks require a running phase" })
-        }
-      }
-    }
-    const firstUnfinished = plan.phases.find((phase) => phase.status !== "completed")
-    if (plan.phases.some((phase) => phase.status === "in_progress" && phase !== firstUnfinished))
+type PlanFields = z.infer<typeof planFields>
+
+function checkPlanStructure(plan: PlanFields, ctx: z.RefinementCtx) {
+  const ids = new Set<string>()
+  let runningPhases = 0
+  let runningTasks = 0
+  for (const phase of plan.phases) {
+    if (ids.has(phase.id)) ctx.addIssue({ code: "custom", message: "plan IDs must be unique" })
+    ids.add(phase.id)
+    if (phase.status === "in_progress") runningPhases++
+    if (phase.status === "blocked" && !phase.blocker)
+      ctx.addIssue({ code: "custom", message: "blocked phases require a blocker" })
+    if (
+      phase.status === "completed" &&
+      (!phase.verification || phase.tasks.some((task) => task.status !== "completed"))
+    ) {
       ctx.addIssue({
         code: "custom",
-        message: "verify the current phase before starting the next phase",
+        message: "completed phases require verified tasks and phase verification",
       })
-    if (runningPhases > 1 || runningTasks > 1)
-      ctx.addIssue({ code: "custom", message: "choose one current phase and task" })
-    if (ids.size > 576 || JSON.stringify(plan).length > 128_000)
-      ctx.addIssue({ code: "custom", message: "plan exceeds the persistent state size limit" })
-  })
+    }
+    for (const task of phase.tasks) {
+      if (ids.has(task.id)) ctx.addIssue({ code: "custom", message: "plan IDs must be unique" })
+      ids.add(task.id)
+      if (task.status === "completed" && !task.evidence)
+        ctx.addIssue({ code: "custom", message: "completed tasks require evidence" })
+      if (task.status === "blocked" && !task.blocker)
+        ctx.addIssue({ code: "custom", message: "blocked tasks require a blocker" })
+      if (task.status === "in_progress") {
+        runningTasks++
+        if (phase.status !== "in_progress")
+          ctx.addIssue({ code: "custom", message: "running tasks require a running phase" })
+      }
+    }
+  }
+  const firstUnfinished = plan.phases.find((phase) => phase.status !== "completed")
+  if (plan.phases.some((phase) => phase.status === "in_progress" && phase !== firstUnfinished))
+    ctx.addIssue({
+      code: "custom",
+      message: "verify the current phase before starting the next phase",
+    })
+  if (runningPhases > 1 || runningTasks > 1)
+    ctx.addIssue({ code: "custom", message: "choose one current phase and task" })
+  if (ids.size > 576)
+    ctx.addIssue({ code: "custom", message: "plan exceeds the persistent state size limit" })
+}
+
+// The size budget covers only model-controlled fields. Server-owned metadata and the
+// changes log (capped at 32 entries) are bounded separately, so they never lock a plan.
+export const GoalPlanInputSchema = planFields.superRefine((plan, ctx) => {
+  checkPlanStructure(plan, ctx)
+  if (JSON.stringify(plan).length > 128_000)
+    ctx.addIssue({ code: "custom", message: "plan exceeds the persistent state size limit" })
+})
 
 export type GoalPlanInput = z.infer<typeof GoalPlanInputSchema>
-export const GoalPlanSchema = GoalPlanInputSchema.safeExtend({
-  decisions: z.array(text).max(32),
-  revision: z.number().int().positive(),
-  updatedAt: z.number().finite().nonnegative(),
-  changes: z
-    .array(
-      z
-        .object({
-          revision: z.number().int().positive(),
-          reason: text,
-          timestamp: z.number().finite(),
-          revisitEvidence: text.optional(),
-        })
-        .strict(),
-    )
-    .max(32),
-})
+export const GoalPlanSchema = planFields
+  .safeExtend({
+    decisions: z.array(text).max(32),
+    revision: z.number().int().positive(),
+    updatedAt: z.number().finite().nonnegative(),
+    changes: z
+      .array(
+        z
+          .object({
+            revision: z.number().int().positive(),
+            reason: text,
+            timestamp: z.number().finite(),
+            revisitEvidence: text.optional(),
+          })
+          .strict(),
+      )
+      .max(32),
+  })
+  .superRefine(checkPlanStructure)
 export type GoalPlan = z.infer<typeof GoalPlanSchema>
 
 /** A task result advances the plan, never the overall goal's scope or lifecycle. */
