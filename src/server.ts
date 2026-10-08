@@ -414,7 +414,11 @@ function timeoutMillisecondsFromSeconds(value: unknown) {
   return Math.min(Math.ceil(value * 1000), MAX_TIMER_DELAY_MS)
 }
 
-function registerDesktopCommands(config: Config, commandName: string, locale: GoalLocale = "en-US") {
+function registerDesktopCommands(
+  config: Config,
+  commandName: string,
+  locale: GoalLocale = "en-US",
+) {
   config.command ??= {}
   const commands = goalCommandDefinitions(commandName, locale)
   for (const command of commands) {
@@ -1270,7 +1274,10 @@ const GOAL_PLAN_TOOLS = new Set([
   "clear_goal",
 ])
 
-function getGoalToolResult(goal: GoalSnapshot | null, messages: GoalMessages = messagesFor("en-US")) {
+function getGoalToolResult(
+  goal: GoalSnapshot | null,
+  messages: GoalMessages = messagesFor("en-US"),
+) {
   const result: { goal: GoalSnapshot | null; goal_mode_notice?: string } = { goal }
   if (goal?.status === "budgetLimited" || goal?.status === "usageLimited") {
     result.goal_mode_notice = messages.notices.limitedGoal
