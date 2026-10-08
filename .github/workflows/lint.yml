@@ -12,6 +12,7 @@ concurrency:
 jobs:
   lint-ts:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,6 +24,7 @@ jobs:
 
   lint-shell:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck
@@ -31,6 +33,7 @@ jobs:
 
   lint-docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

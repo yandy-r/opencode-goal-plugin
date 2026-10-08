@@ -17,6 +17,7 @@ jobs:
     # Fork PRs cannot be pushed back to; the check workflow (lint.yml) still runs authoritatively.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout PR head branch
         uses: actions/checkout@v4
