@@ -29,8 +29,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          cache: npm
-      - run: npm ci --no-audit --no-fund
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - run: bun install --frozen-lockfile
 
       - name: Install shellcheck
         run: ./scripts/install-shellcheck.sh
