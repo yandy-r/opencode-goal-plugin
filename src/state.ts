@@ -11,7 +11,7 @@ import {
   goalPlanProgress,
   reviseGoalPlan,
 } from "./goal-plan"
-import { withStateLock } from "./state-lock"
+import { type StateLockHandle, withStateLock } from "./state-lock"
 import { statePath } from "./state-path"
 
 export { statePath } from "./state-path"
@@ -589,11 +589,11 @@ async function mutate<T>(fn: (state: State) => T | Promise<T>) {
   return enqueueMutation(async () => {
     const file = statePath()
     await Effect.runPromise(ensureStateDirEffect(file))
-    return withStateLock(file, () => runMutation(file, fn))
+    return withStateLock(file, (lock) => runMutation(file, lock, fn))
   })
 }
 
-function runMutation<T>(file: string, fn: (state: State) => T | Promise<T>) {
+function runMutation<T>(file: string, lock: StateLockHandle, fn: (state: State) => T | Promise<T>) {
   return Effect.runPromise(
     Effect.gen(function* () {
       const { state, recoveryContent, raw } = yield* readStateResultEffect(file)
@@ -656,6 +656,12 @@ function runMutation<T>(file: string, fn: (state: State) => T | Promise<T>) {
       // persisted. A missing file counts as holding the empty state.
       const onDisk = raw ?? serializeState(emptyState())
       if (recoveryContent != null || serializeState(state) !== onDisk) {
+        // A holder stalled past the stale window may have lost the lock to
+        // another process; writing now would drop that process's update.
+        yield* Effect.tryPromise({
+          try: () => lock.assertHeld(),
+          catch: (cause) => new StateWriteError({ cause }),
+        })
         yield* writeStateEffect(state, file)
       }
       return result

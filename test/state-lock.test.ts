@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { getGoal, recordAssistantProgress, recordPromptAgent } from "../src/state"
-import { StateLockTimeoutError, withStateLock } from "../src/state-lock"
+import { StateLockLostError, StateLockTimeoutError, withStateLock } from "../src/state-lock"
 
 let dir = ""
 let stateFile = ""
@@ -51,12 +51,17 @@ test("mutations for a session without a goal do not write the state file", async
 
 test("withStateLock serializes holders and removes the lock afterwards", async () => {
   const order: string[] = []
+  let entered!: () => void
+  const firstEntered = new Promise<void>((resolve) => {
+    entered = resolve
+  })
   const first = withStateLock(stateFile, async () => {
     order.push("first:start")
+    entered()
     await Bun.sleep(50)
     order.push("first:end")
   })
-  await Bun.sleep(5)
+  await firstEntered
   const second = withStateLock(stateFile, async () => {
     order.push("second")
   })
@@ -90,4 +95,45 @@ test("withStateLock times out instead of running unlocked when a live holder kee
   ).rejects.toBeInstanceOf(StateLockTimeoutError)
   expect(ran).toBe(false)
   expect(await readFile(lockFile, "utf8")).toBe("1:live")
+})
+
+test("a holder whose stale lock was taken over cannot pass assertHeld", async () => {
+  const lockFile = `${stateFile}.lock`
+  await expect(
+    withStateLock(stateFile, async (lock) => {
+      await lock.assertHeld()
+      await writeFile(lockFile, "2:successor")
+      await lock.assertHeld()
+    }),
+  ).rejects.toBeInstanceOf(StateLockLostError)
+  // The successor's lock is left in place on release.
+  expect(await readFile(lockFile, "utf8")).toBe("2:successor")
+})
+
+test("concurrent waiters break a stale lock once and never overlap", async () => {
+  const lockFile = `${stateFile}.lock`
+  await writeFile(lockFile, "999999:dead")
+  const old = new Date(Date.now() - 60_000)
+  await utimes(lockFile, old, old)
+  let active = 0
+  let maxActive = 0
+  const results = await Promise.all(
+    [1, 2, 3, 4].map((index) =>
+      withStateLock(
+        stateFile,
+        async () => {
+          active += 1
+          maxActive = Math.max(maxActive, active)
+          await Bun.sleep(10)
+          active -= 1
+          return index
+        },
+        { staleMs: 1_000, retryMs: 5 },
+      ),
+    ),
+  )
+  expect(results.sort()).toEqual([1, 2, 3, 4])
+  expect(maxActive).toBe(1)
+  await expect(stat(lockFile)).rejects.toMatchObject({ code: "ENOENT" })
+  await expect(stat(`${lockFile}.break`)).rejects.toMatchObject({ code: "ENOENT" })
 })

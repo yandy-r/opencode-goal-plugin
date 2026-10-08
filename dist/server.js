@@ -938,7 +938,7 @@ async function atomicWriteFile(file, data, ops = defaultAtomicWriteOps) {
 
 // src/state-lock.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { link, open as open2, readFile, rename as rename2, stat, unlink as unlink2, utimes } from "fs/promises";
+import { open as open2, readFile, stat, unlink as unlink2, utimes } from "fs/promises";
 
 class StateLockTimeoutError extends Error {
   constructor(lockFile, timeoutMs) {
@@ -946,18 +946,29 @@ class StateLockTimeoutError extends Error {
     this.name = "StateLockTimeoutError";
   }
 }
-var DEFAULT_STALE_MS = 1e4;
-var DEFAULT_TIMEOUT_MS = 30000;
+
+class StateLockLostError extends Error {
+  constructor(lockFile) {
+    super(`goal state lock ${lockFile} was taken over while held; refusing to write`);
+    this.name = "StateLockLostError";
+  }
+}
+var DEFAULT_STALE_MS = 30000;
+var DEFAULT_TIMEOUT_MS = 60000;
 var DEFAULT_RETRY_MS = 25;
 function errorCode(error) {
   return typeof error === "object" && error !== null ? error.code : undefined;
 }
+function isTransientContention(error) {
+  const code = errorCode(error);
+  return process.platform === "win32" && (code === "EPERM" || code === "EBUSY");
+}
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function tryCreateLock(lockFile, token) {
+async function tryCreateExclusive(file, token) {
   try {
-    const handle = await open2(lockFile, "wx", 384);
+    const handle = await open2(file, "wx", 384);
     try {
       await handle.writeFile(token);
     } finally {
@@ -965,7 +976,7 @@ async function tryCreateLock(lockFile, token) {
     }
     return true;
   } catch (error) {
-    if (errorCode(error) === "EEXIST")
+    if (errorCode(error) === "EEXIST" || isTransientContention(error))
       return false;
     throw error;
   }
@@ -979,49 +990,50 @@ async function readToken(file) {
     throw error;
   }
 }
-async function breakStaleLock(lockFile, staleToken) {
-  const aside = `${lockFile}.stale-${randomUUID2()}`;
+async function removeIfPresent(file) {
   try {
-    await rename2(lockFile, aside);
+    await unlink2(file);
   } catch (error) {
-    if (errorCode(error) === "ENOENT")
-      return;
-    throw error;
+    if (errorCode(error) !== "ENOENT" && !isTransientContention(error))
+      throw error;
   }
-  const token = await readToken(aside);
-  if (token !== staleToken) {
-    try {
-      await link(aside, lockFile);
-    } catch (error) {
-      if (errorCode(error) !== "EEXIST")
-        throw error;
-    }
-  }
-  await unlink2(aside).catch(() => {
-    return;
-  });
 }
-async function staleLockToken(lockFile, staleMs) {
+async function isStale(file, staleMs) {
   try {
-    const info = await stat(lockFile);
-    if (Date.now() - info.mtimeMs <= staleMs)
-      return null;
-    return await readToken(lockFile);
+    return Date.now() - (await stat(file)).mtimeMs > staleMs;
   } catch (error) {
     if (errorCode(error) === "ENOENT")
-      return null;
+      return false;
     throw error;
+  }
+}
+async function breakStaleLock(lockFile, staleMs) {
+  const guard = `${lockFile}.break`;
+  const guardToken = randomUUID2();
+  if (!await tryCreateExclusive(guard, guardToken)) {
+    if (await isStale(guard, staleMs))
+      await removeIfPresent(guard);
+    return;
+  }
+  try {
+    if (await isStale(lockFile, staleMs))
+      await removeIfPresent(lockFile);
+  } finally {
+    if (await readToken(guard).catch(() => null) === guardToken) {
+      await removeIfPresent(guard).catch(() => {
+        return;
+      });
+    }
   }
 }
 async function acquireStateLock(lockFile, options) {
   const token = `${process.pid}:${randomUUID2()}`;
   const deadline = Date.now() + options.timeoutMs;
   while (true) {
-    if (await tryCreateLock(lockFile, token))
+    if (await tryCreateExclusive(lockFile, token))
       return token;
-    const staleToken = await staleLockToken(lockFile, options.staleMs);
-    if (staleToken != null) {
-      await breakStaleLock(lockFile, staleToken);
+    if (await isStale(lockFile, options.staleMs)) {
+      await breakStaleLock(lockFile, options.staleMs);
       continue;
     }
     if (Date.now() >= deadline)
@@ -1033,19 +1045,21 @@ async function releaseStateLock(lockFile, token) {
   try {
     if (await readToken(lockFile) !== token)
       return;
-    await unlink2(lockFile);
+    await removeIfPresent(lockFile);
   } catch (error) {
-    if (errorCode(error) === "ENOENT")
-      return;
     try {
       console.error(`[opencode-goal-plugin] Could not release goal state lock ${lockFile}; it will expire as stale:`, error instanceof Error ? error.message : String(error));
     } catch {}
   }
 }
-function startHeartbeat(lockFile, staleMs) {
+function startHeartbeat(lockFile, token, staleMs) {
   const timer = setInterval(() => {
-    const now = new Date;
-    utimes(lockFile, now, now).catch(() => {
+    readToken(lockFile).then((current) => {
+      if (current !== token)
+        return;
+      const now = new Date;
+      return utimes(lockFile, now, now);
+    }).catch(() => {
       return;
     });
   }, Math.max(1, Math.floor(staleMs / 3)));
@@ -1060,9 +1074,15 @@ async function withStateLock(stateFile, operation, options = {}) {
   };
   const lockFile = `${stateFile}.lock`;
   const token = await acquireStateLock(lockFile, resolved);
-  const stopHeartbeat = startHeartbeat(lockFile, resolved.staleMs);
+  const stopHeartbeat = startHeartbeat(lockFile, token, resolved.staleMs);
+  const handle = {
+    async assertHeld() {
+      if (await readToken(lockFile) !== token)
+        throw new StateLockLostError(lockFile);
+    }
+  };
   try {
-    return await operation();
+    return await operation(handle);
   } finally {
     stopHeartbeat();
     await releaseStateLock(lockFile, token);
@@ -1330,10 +1350,10 @@ async function mutate(fn) {
   return enqueueMutation(async () => {
     const file = statePath();
     await Effect.runPromise(ensureStateDirEffect(file));
-    return withStateLock(file, () => runMutation(file, fn));
+    return withStateLock(file, (lock) => runMutation(file, lock, fn));
   });
 }
-function runMutation(file, fn) {
+function runMutation(file, lock, fn) {
   return Effect.runPromise(Effect.gen(function* () {
     const { state, recoveryContent, raw } = yield* readStateResultEffect(file);
     const result = yield* Effect.tryPromise({
@@ -1377,6 +1397,10 @@ function runMutation(file, fn) {
     }
     const onDisk = raw ?? serializeState(emptyState());
     if (recoveryContent != null || serializeState(state) !== onDisk) {
+      yield* Effect.tryPromise({
+        try: () => lock.assertHeld(),
+        catch: (cause) => new StateWriteError({ cause })
+      });
       yield* writeStateEffect(state, file);
     }
     return result;

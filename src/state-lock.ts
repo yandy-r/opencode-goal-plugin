@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { link, open, readFile, rename, stat, unlink, utimes } from "node:fs/promises"
+import { open, readFile, stat, unlink, utimes } from "node:fs/promises"
 
 /**
  * Cross-process exclusive lock for the goal state file.
@@ -12,9 +12,11 @@ import { link, open, readFile, rename, stat, unlink, utimes } from "node:fs/prom
  *
  * The lock is a file created with `O_EXCL` that holds a unique token. While it
  * is held, its mtime is refreshed on a heartbeat, so a lock whose mtime is older
- * than `staleMs` belongs to a holder that died without releasing it and may be
- * broken. Breaking renames the lock aside and checks the token first, so a
- * waiter never deletes a lock that a live holder has just taken.
+ * than `staleMs` belongs to a holder that died (or stalled) without releasing
+ * it and may be broken. Breakers are serialized through a second short-lived
+ * `O_EXCL` guard and re-check the token under it, so two waiters can never
+ * both break and re-take the lock. A holder that stalled past `staleMs` finds
+ * out through `assertHeld()` before it writes.
  */
 
 export type StateLockOptions = {
@@ -26,6 +28,11 @@ export type StateLockOptions = {
   retryMs?: number
 }
 
+export type StateLockHandle = {
+  /** Throws `StateLockLostError` if the lock was broken while held. */
+  assertHeld(): Promise<void>
+}
+
 export class StateLockTimeoutError extends Error {
   constructor(lockFile: string, timeoutMs: number) {
     super(`timed out after ${timeoutMs}ms waiting for goal state lock ${lockFile}`)
@@ -33,8 +40,15 @@ export class StateLockTimeoutError extends Error {
   }
 }
 
-const DEFAULT_STALE_MS = 10_000
-const DEFAULT_TIMEOUT_MS = 30_000
+export class StateLockLostError extends Error {
+  constructor(lockFile: string) {
+    super(`goal state lock ${lockFile} was taken over while held; refusing to write`)
+    this.name = "StateLockLostError"
+  }
+}
+
+const DEFAULT_STALE_MS = 30_000
+const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_RETRY_MS = 25
 
 function errorCode(error: unknown) {
@@ -43,13 +57,20 @@ function errorCode(error: unknown) {
     : undefined
 }
 
+// On Windows a file that another process is deleting or has open can make
+// create/unlink fail transiently with EPERM/EBUSY; treat that as contention.
+function isTransientContention(error: unknown) {
+  const code = errorCode(error)
+  return process.platform === "win32" && (code === "EPERM" || code === "EBUSY")
+}
+
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
 
-async function tryCreateLock(lockFile: string, token: string) {
+async function tryCreateExclusive(file: string, token: string) {
   try {
-    const handle = await open(lockFile, "wx", 0o600)
+    const handle = await open(file, "wx", 0o600)
     try {
       await handle.writeFile(token)
     } finally {
@@ -57,7 +78,7 @@ async function tryCreateLock(lockFile: string, token: string) {
     }
     return true
   } catch (error) {
-    if (errorCode(error) === "EEXIST") return false
+    if (errorCode(error) === "EEXIST" || isTransientContention(error)) return false
     throw error
   }
 }
@@ -71,39 +92,42 @@ async function readToken(file: string) {
   }
 }
 
-/**
- * Removes the lock at `lockFile` if it still holds `staleToken`. Renaming first
- * makes the check and the removal one step: if the renamed file turns out to
- * hold a different token, a live holder took the lock in between and it is put
- * back with `link`, which never overwrites a lock created in the meantime.
- */
-async function breakStaleLock(lockFile: string, staleToken: string) {
-  const aside = `${lockFile}.stale-${randomUUID()}`
+async function removeIfPresent(file: string) {
   try {
-    await rename(lockFile, aside)
+    await unlink(file)
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return
-    throw error
+    if (errorCode(error) !== "ENOENT" && !isTransientContention(error)) throw error
   }
-  const token = await readToken(aside)
-  if (token !== staleToken) {
-    try {
-      await link(aside, lockFile)
-    } catch (error) {
-      if (errorCode(error) !== "EEXIST") throw error
-    }
-  }
-  await unlink(aside).catch(() => undefined)
 }
 
-async function staleLockToken(lockFile: string, staleMs: number) {
+async function isStale(file: string, staleMs: number) {
   try {
-    const info = await stat(lockFile)
-    if (Date.now() - info.mtimeMs <= staleMs) return null
-    return await readToken(lockFile)
+    return Date.now() - (await stat(file)).mtimeMs > staleMs
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return null
+    if (errorCode(error) === "ENOENT") return false
     throw error
+  }
+}
+
+/**
+ * Removes `lockFile` if it is still stale. Only the holder of the break guard
+ * may do this, and it re-reads staleness under the guard, so a lock that was
+ * released and re-taken in the meantime is left alone. A guard abandoned by a
+ * breaker that died is itself removed once stale.
+ */
+async function breakStaleLock(lockFile: string, staleMs: number) {
+  const guard = `${lockFile}.break`
+  const guardToken = randomUUID()
+  if (!(await tryCreateExclusive(guard, guardToken))) {
+    if (await isStale(guard, staleMs)) await removeIfPresent(guard)
+    return
+  }
+  try {
+    if (await isStale(lockFile, staleMs)) await removeIfPresent(lockFile)
+  } finally {
+    if ((await readToken(guard).catch(() => null)) === guardToken) {
+      await removeIfPresent(guard).catch(() => undefined)
+    }
   }
 }
 
@@ -111,10 +135,9 @@ async function acquireStateLock(lockFile: string, options: Required<StateLockOpt
   const token = `${process.pid}:${randomUUID()}`
   const deadline = Date.now() + options.timeoutMs
   while (true) {
-    if (await tryCreateLock(lockFile, token)) return token
-    const staleToken = await staleLockToken(lockFile, options.staleMs)
-    if (staleToken != null) {
-      await breakStaleLock(lockFile, staleToken)
+    if (await tryCreateExclusive(lockFile, token)) return token
+    if (await isStale(lockFile, options.staleMs)) {
+      await breakStaleLock(lockFile, options.staleMs)
       continue
     }
     if (Date.now() >= deadline) throw new StateLockTimeoutError(lockFile, options.timeoutMs)
@@ -128,9 +151,8 @@ async function releaseStateLock(lockFile: string, token: string) {
   // committed mutation into an error: the lock simply goes stale.
   try {
     if ((await readToken(lockFile)) !== token) return
-    await unlink(lockFile)
+    await removeIfPresent(lockFile)
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return
     try {
       console.error(
         `[opencode-goal-plugin] Could not release goal state lock ${lockFile}; it will expire as stale:`,
@@ -142,11 +164,17 @@ async function releaseStateLock(lockFile: string, token: string) {
   }
 }
 
-function startHeartbeat(lockFile: string, staleMs: number) {
+function startHeartbeat(lockFile: string, token: string, staleMs: number) {
   const timer = setInterval(
     () => {
-      const now = new Date()
-      void utimes(lockFile, now, now).catch(() => undefined)
+      // Touch the lock only while it is still ours, never a successor's.
+      void readToken(lockFile)
+        .then((current) => {
+          if (current !== token) return
+          const now = new Date()
+          return utimes(lockFile, now, now)
+        })
+        .catch(() => undefined)
     },
     Math.max(1, Math.floor(staleMs / 3)),
   )
@@ -156,7 +184,7 @@ function startHeartbeat(lockFile: string, staleMs: number) {
 
 export async function withStateLock<T>(
   stateFile: string,
-  operation: () => Promise<T>,
+  operation: (lock: StateLockHandle) => Promise<T>,
   options: StateLockOptions = {},
 ): Promise<T> {
   const resolved: Required<StateLockOptions> = {
@@ -166,9 +194,14 @@ export async function withStateLock<T>(
   }
   const lockFile = `${stateFile}.lock`
   const token = await acquireStateLock(lockFile, resolved)
-  const stopHeartbeat = startHeartbeat(lockFile, resolved.staleMs)
+  const stopHeartbeat = startHeartbeat(lockFile, token, resolved.staleMs)
+  const handle: StateLockHandle = {
+    async assertHeld() {
+      if ((await readToken(lockFile)) !== token) throw new StateLockLostError(lockFile)
+    },
+  }
   try {
-    return await operation()
+    return await operation(handle)
   } finally {
     stopHeartbeat()
     await releaseStateLock(lockFile, token)
