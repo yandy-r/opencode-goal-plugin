@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "envFile": "${userHome}/.config/env/github-env-mcp",
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_API_TOKEN}"
+      }
+    },
+    "linear-personal": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    }
+  }
+}
