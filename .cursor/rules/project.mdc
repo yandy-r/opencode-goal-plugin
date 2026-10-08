@@ -1,0 +1,24 @@
+---
+description: opencode-goal-plugin project rules
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# opencode-goal-plugin
+
+OpenCode plugin adding Codex-style long-running goal mode: a `/goal` command, goal tools, persistence, and a TUI sidebar. Server entry `src/server.ts`, TUI entry `src/tui.ts`, state in `src/state.ts`. See [`AGENTS.md`](AGENTS.md) for project-specific change guidelines.
+
+Full agent rules live in [`CLAUDE.md`](../../CLAUDE.md). Key points surfaced for Cursor:
+
+## Rules
+
+- Follow Conventional Commits for every commit: `feat|fix|docs|refactor|perf|test|build|ci|chore(scope): …`.
+- Never commit `.env` / secrets / tokens.
+- Use `.github/ISSUE_TEMPLATE/*.yml` when present; link `Closes #…` in every PR.
+- Keep files around ~500 lines (soft cap). Refactor meaningful overruns into smaller modules.
+- Modular code: small cohesive units, DRY, composition over inheritance, single responsibility.
+- Prefer working in a git worktree for non-trivial changes — `git worktree add <repo-root>/.claude/worktrees/<repo>-<branch>/`. Use the main checkout only for one-liners or when worktree creation is blocked.
+- - TypeScript: strict mode enabled, `PascalCase` components, `camelCase` hooks/functions, prefer `unknown` over `any`.- - 
+## Verification
+
+Run `bun run test` and `bun run lint` before marking work complete.
