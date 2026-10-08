@@ -2,3 +2,18 @@
 dist/
 node_modules/
 plans/
+
+# Environment / secrets — never commit (encrypted dotenvx files excepted)
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.encrypted
+*.pem
+*.key
+
+# Claude Code / agent scratch
+.claude/worktrees/
+.claude/session-data/
+.claude/plans/
+.claude/settings.local.json

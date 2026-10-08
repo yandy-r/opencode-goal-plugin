@@ -103,7 +103,8 @@ const EN_MESSAGES: GoalMessages = {
     getGoal:
       "Get the current goal for this OpenCode session, including status, observed token usage, elapsed-time usage, " +
       "budgets, checkpoints, and history.",
-    getGoalHistory: "Get the current goal lifecycle history and recent checkpoints for this OpenCode session.",
+    getGoalHistory:
+      "Get the current goal lifecycle history and recent checkpoints for this OpenCode session.",
     listAllGoals:
       "List up to 50 public goal summaries across all sessions in this state file, ordered by most recently updated " +
       "first. Elapsed time is the last persisted value; total and truncated report omitted older goals.",
@@ -117,7 +118,8 @@ const EN_MESSAGES: GoalMessages = {
       "write the objective itself based on the user's explicit request. If any non-closed goal exists, this returns " +
       "the existing goal as either reused or conflicting and must not be retried. While the session is in Plan mode, " +
       "the goal is recorded as paused and execution requires the user to switch to Build mode.",
-    updateGoalObjective: "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it.",
+    updateGoalObjective:
+      "Edit the current OpenCode goal objective when the user explicitly asks to edit or replace it.",
     updateGoal:
       "Close the existing goal only after an audit against real evidence. Use status complete only when the objective " +
       "is achieved and no required work remains, and include evidence. Use status unmet only when the objective " +
@@ -190,11 +192,14 @@ const EN_MESSAGES: GoalMessages = {
     clear: "Clear",
     clearDescription: "Ask the agent to clear this session goal",
     refreshPrompt: "Call get_goal for this session and report the current goal state briefly.",
-    historyPrompt: "Call get_goal_history for this session and report the current goal history briefly.",
-    pausePrompt: 'Pause the current session goal by calling update_goal_status with status "paused". Report the result briefly.',
+    historyPrompt:
+      "Call get_goal_history for this session and report the current goal history briefly.",
+    pausePrompt:
+      'Pause the current session goal by calling update_goal_status with status "paused". Report the result briefly.',
     resumePrompt:
       'Resume the current session goal by calling update_goal_status with status "active", then continue working toward it.',
-    clearPrompt: "Clear the current session goal by calling clear_goal. Report whether a goal was cleared.",
+    clearPrompt:
+      "Clear the current session goal by calling clear_goal. Report whether a goal was cleared.",
     openSession: "Open a session before viewing goal state.",
     noGoal: "No recent goal state found in this session.",
     objective: "Objective",
@@ -225,7 +230,8 @@ const ZH_CN_MESSAGES: GoalMessages = {
     resumeDescription: "继续当前会话的长期目标",
   },
   tools: {
-    getGoal: "获取当前 OpenCode 会话的目标，包括状态、已观察到的 token 使用量、已用时间、预算、检查点和历史记录。",
+    getGoal:
+      "获取当前 OpenCode 会话的目标，包括状态、已观察到的 token 使用量、已用时间、预算、检查点和历史记录。",
     getGoalHistory: "获取当前 OpenCode 会话的目标生命周期历史和最近的检查点。",
     listAllGoals:
       "列出此状态文件中所有会话里最近更新的最多 50 个公开目标摘要。已用时间采用最后一次持久化的值；total 和 truncated 字段用于说明是否省略了更早的目标。",
@@ -242,9 +248,12 @@ const ZH_CN_MESSAGES: GoalMessages = {
       "只有在依据真实证据完成审计后才能关闭现有目标。仅当目标已经达成且没有剩余必需工作时使用 complete，并提供证据；仅当目标无法达成或被阻塞时使用 unmet，并提供阻塞原因。不要仅因为准备停止工作就关闭目标。",
     updateGoalStatus:
       "仅当用户明确要求暂停或继续目标时，暂停或继续当前 OpenCode 目标。在 Plan 模式下不能继续目标；用户必须先切换到 Build 模式。",
-    stopGoal: "仅当用户明确要求停止或取消目标时，取消当前 OpenCode 目标。取消是终态，会阻止后续自动继续，并保留目标及其历史。",
-    replaceGoal: "仅当用户明确要求替换目标时，原子地取消并归档当前目标，然后在同一会话中创建新的独立目标。",
-    clearGoal: "仅当用户明确要求清除目标时，将当前目标从会话中分离并归档；若目标仍在活动，会先取消再清除。",
+    stopGoal:
+      "仅当用户明确要求停止或取消目标时，取消当前 OpenCode 目标。取消是终态，会阻止后续自动继续，并保留目标及其历史。",
+    replaceGoal:
+      "仅当用户明确要求替换目标时，原子地取消并归档当前目标，然后在同一会话中创建新的独立目标。",
+    clearGoal:
+      "仅当用户明确要求清除目标时，将当前目标从会话中分离并归档；若目标仍在活动，会先取消再清除。",
     objective: "要开始执行的具体目标。",
     modelObjective: "由模型制定、要开始执行的具体目标。",
     updatedObjective: "更新后的具体目标。",
@@ -294,7 +303,8 @@ const ZH_CN_MESSAGES: GoalMessages = {
     clearDescription: "让 Agent 清除当前会话目标",
     refreshPrompt: "调用 get_goal 获取此会话的当前目标，并用简体中文简要报告目标状态。",
     historyPrompt: "调用 get_goal_history 获取此会话的当前目标历史，并用简体中文简要报告。",
-    pausePrompt: '调用 update_goal_status 并将 status 设为 "paused"，暂停当前会话目标。用简体中文简要报告结果。',
+    pausePrompt:
+      '调用 update_goal_status 并将 status 设为 "paused"，暂停当前会话目标。用简体中文简要报告结果。',
     resumePrompt:
       '调用 update_goal_status 并将 status 设为 "active"，继续当前会话目标，然后继续推进该目标。请使用简体中文回复用户。',
     clearPrompt: "调用 clear_goal 清除当前会话目标，并用简体中文报告是否成功清除了目标。",
@@ -440,7 +450,8 @@ export function presentGoalLastStatus(status: string, locale: GoalLocale): strin
       "目标内容已更新；会话处于 Plan 模式，因此执行已暂停。",
     "Goal objective updated and resumed.": "目标内容已更新并继续执行。",
     "Goal objective updated and paused.": "目标内容已更新并暂停。",
-    "Auto-continue paused while the session is in Plan mode.": "会话处于 Plan 模式，因此自动继续已暂停。",
+    "Auto-continue paused while the session is in Plan mode.":
+      "会话处于 Plan 模式，因此自动继续已暂停。",
     "Goal resumed.": "目标已继续。",
     "Goal paused.": "目标已暂停。",
     "Goal completed.": "目标已完成。",
@@ -449,7 +460,8 @@ export function presentGoalLastStatus(status: string, locale: GoalLocale): strin
     "Goal cancelled because it was replaced.": "目标因被替换而取消。",
     "Auto-continue attempt canceled before delivery.": "自动继续尝试已在发送前取消。",
     "Auto-continue prompt sent.": "自动继续提示已发送。",
-    "Auto-continue prompt failed repeatedly. Resume the goal to retry.": "自动继续提示反复失败。请继续目标后重试。",
+    "Auto-continue prompt failed repeatedly. Resume the goal to retry.":
+      "自动继续提示反复失败。请继续目标后重试。",
     "Goal execution is paused while the session is in Plan mode. Switch to Build mode and resume the goal to continue.":
       "会话处于 Plan 模式，因此目标执行已暂停。请切换到 Build 模式并继续目标。",
   }
@@ -458,9 +470,12 @@ export function presentGoalLastStatus(status: string, locale: GoalLocale): strin
   const lowProgressPausePattern =
     /^Auto-continue paused after (\d+) low-progress continuation turn\(s\)\. Resume the goal to retry\.$/
   const lowProgressPause = lowProgressPausePattern.exec(status)
-  if (lowProgressPause) return `自动继续已在 ${lowProgressPause[1]} 个低进展轮次后暂停。请继续目标后重试。`
+  if (lowProgressPause)
+    return `自动继续已在 ${lowProgressPause[1]} 个低进展轮次后暂停。请继续目标后重试。`
 
-  const lowProgress = /^Low-progress continuation turn detected \((\d+)\/(\d+|unbounded)\)\.$/.exec(status)
+  const lowProgress = /^Low-progress continuation turn detected \((\d+)\/(\d+|unbounded)\)\.$/.exec(
+    status,
+  )
   if (lowProgress) {
     const limit = lowProgress[2] === "unbounded" ? "不限" : lowProgress[2]
     return `检测到低进展的继续轮次（${lowProgress[1]}/${limit}）。`
@@ -539,9 +554,16 @@ type PresentableGoalHistory = {
   history: Array<{ type: string; detail: string; timestamp: number }>
 }
 
-export function formatGoalHistoryPresentation(goal: PresentableGoalHistory | null, locale: GoalLocale): string {
-  if (!goal) return locale === "zh-CN" ? "此会话没有可用的目标历史。" : "No goal history is available for this session."
-  if (goal.history.length === 0) return locale === "zh-CN" ? "尚未记录目标历史。" : "No goal history recorded yet."
+export function formatGoalHistoryPresentation(
+  goal: PresentableGoalHistory | null,
+  locale: GoalLocale,
+): string {
+  if (!goal)
+    return locale === "zh-CN"
+      ? "此会话没有可用的目标历史。"
+      : "No goal history is available for this session."
+  if (goal.history.length === 0)
+    return locale === "zh-CN" ? "尚未记录目标历史。" : "No goal history recorded yet."
   return goal.history
     .map((entry) => {
       const timestamp = new Date(entry.timestamp * 1000).toISOString()

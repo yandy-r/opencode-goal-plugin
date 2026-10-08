@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { GoalPlanInputSchema, goalPlanEntries, type GoalPlanInput } from "../src/goal-plan"
+import { type GoalPlanInput, GoalPlanInputSchema, goalPlanEntries } from "../src/goal-plan"
 import {
   cancelGoal,
   clearGoal,
@@ -81,7 +81,11 @@ test("verified phases persist across reads and advance to remaining work without
   expect(persisted.version).toBe(3)
   expect((await getGoal("session"))?.plan).toEqual(persisted.goals.session.plan)
   expect(goalPlanEntries(updated.plan!)).toEqual([
-    { content: "Parser correctness: Fix compound queries", status: "completed", priority: "medium" },
+    {
+      content: "Parser correctness: Fix compound queries",
+      status: "completed",
+      priority: "medium",
+    },
     { content: "Query execution: Implement the planner", status: "pending", priority: "medium" },
   ])
   await expect(completeGoal("session", "A parser task passed")).rejects.toThrow("planned phases")
@@ -113,8 +117,13 @@ test("stale, narrowed, deleted or reopened completed work cannot overwrite a ver
   )
   await expect(update({ ...plan, phases: [plan.phases[1]!] })).rejects.toThrow("verified phase")
   expect(
-    (await update(initialPlan(), 1, "A newly failing compound-query regression requires revisiting the parser"))
-      .planRevision,
+    (
+      await update(
+        initialPlan(),
+        1,
+        "A newly failing compound-query regression requires revisiting the parser",
+      )
+    ).planRevision,
   ).toBe(2)
 })
 
@@ -136,7 +145,12 @@ test("task and phase completion require evidence and a phase cannot leap over un
 
 test("scope edits and replacements reject an old planner's delayed update", async () => {
   const goal = await createGoal("session", "Original scope")
-  const input = { goalID: goal.id, expectedRevision: 0, plan: initialPlan(), reason: "Original plan" }
+  const input = {
+    goalID: goal.id,
+    expectedRevision: 0,
+    plan: initialPlan(),
+    reason: "Original plan",
+  }
   await updateGoalObjective("session", "Explicitly edited scope")
   await expect(updateGoalPlan("session", input)).rejects.toThrow("revision changed")
   await replaceGoal("session", "New independent scope")
@@ -151,7 +165,12 @@ test("version 2 state upgrades without changing existing goal identity or accoun
   delete state.goals.session.plan
   delete state.goals.session.planRevision
   await writeFile(file, JSON.stringify(state))
-  expect(await getGoal("session")).toMatchObject({ id: goal.id, tokenBudget: 100, plan: null, planRevision: 0 })
+  expect(await getGoal("session")).toMatchObject({
+    id: goal.id,
+    tokenBudget: 100,
+    plan: null,
+    planRevision: 0,
+  })
   await updateGoalPlan("session", {
     goalID: goal.id,
     expectedRevision: 0,
@@ -163,16 +182,31 @@ test("version 2 state upgrades without changing existing goal identity or accoun
 
 test("pending phase and task scope cannot disappear without recorded revisit evidence", async () => {
   const goal = await createGoal("session", "Keep the full engine scope")
-  await updateGoalPlan("session", { goalID: goal.id, expectedRevision: 0, plan: initialPlan(), reason: "Full scope" })
+  await updateGoalPlan("session", {
+    goalID: goal.id,
+    expectedRevision: 0,
+    plan: initialPlan(),
+    reason: "Full scope",
+  })
   const narrowed = initialPlan()
   narrowed.phases.pop()
   await expect(
-    updateGoalPlan("session", { goalID: goal.id, expectedRevision: 1, plan: narrowed, reason: "Only parser remains" }),
+    updateGoalPlan("session", {
+      goalID: goal.id,
+      expectedRevision: 1,
+      plan: narrowed,
+      reason: "Only parser remains",
+    }),
   ).rejects.toThrow("scope")
   const changed = initialPlan()
   changed.phases[1]!.objective = "Only parsing"
   await expect(
-    updateGoalPlan("session", { goalID: goal.id, expectedRevision: 1, plan: changed, reason: "Narrow execution" }),
+    updateGoalPlan("session", {
+      goalID: goal.id,
+      expectedRevision: 1,
+      plan: changed,
+      reason: "Narrow execution",
+    }),
   ).rejects.toThrow("scope")
   const revised = await updateGoalPlan("session", {
     goalID: goal.id,
@@ -187,7 +221,12 @@ test("pending phase and task scope cannot disappear without recorded revisit evi
 
 test("a planned objective can only clear its plan with an explicit grant for that goal and exact objective", async () => {
   const goal = await createGoal("session", "Keep the full engine scope")
-  await updateGoalPlan("session", { goalID: goal.id, expectedRevision: 0, plan: initialPlan(), reason: "Full scope" })
+  await updateGoalPlan("session", {
+    goalID: goal.id,
+    expectedRevision: 0,
+    plan: initialPlan(),
+    reason: "Full scope",
+  })
   await expect(updateGoalObjective("session", "Only parser")).rejects.toThrow("/goal edit")
   await expect(
     updateGoalObjective("session", "Only parser", "active", {

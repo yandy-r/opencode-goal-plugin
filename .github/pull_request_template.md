@@ -22,4 +22,4 @@
 - [ ] `bun run build` passes and `dist/server.js` is committed if server code changed
 - [ ] README/docs updated if behavior or options changed
 
-> Note: merging to `main` automatically publishes a new patch release to npm.
+> Note: merging to `main` publishes a `dev` snapshot to npm; releases are cut by pushing a `vX.Y.Z` tag.

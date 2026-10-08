@@ -42,10 +42,10 @@ Common use cases:
 
 Choose the instructions that match the CLI you run:
 
-| OpenCode version | How to identify it | Instructions |
-| --- | --- | --- |
+| OpenCode version  | How to identify it                                       | Instructions                     |
+| ----------------- | -------------------------------------------------------- | -------------------------------- |
 | OpenCode 1 stable | You run `opencode` and `opencode --version` prints `1.x` | [OpenCode 1](#opencode-1-stable) |
-| OpenCode 2 beta | You run `opencode2` | [OpenCode 2](#opencode-2-beta) |
+| OpenCode 2 beta   | You run `opencode2`                                      | [OpenCode 2](#opencode-2-beta)   |
 
 Do not mix the configuration formats. OpenCode 1 uses `plugin` and `tui.json`; OpenCode 2 uses `plugins` and the global `cli.json`.
 
@@ -295,7 +295,7 @@ verify an exact published package in the isolated environment.
 
 ## Publishing
 
-This package is set up for npm Trusted Publishing from GitHub Actions. On every push to `main`, CI runs typecheck, lint, and unit tests in parallel. If they all pass, the publish job computes the next patch version from the latest version on npm, builds the package, and runs `npm publish`.
+Branching and release rules live in [`RELEASING.md`](RELEASING.md). This package is set up for npm Trusted Publishing from GitHub Actions. Releases are cut from tags: pushing a `vX.Y.Z` tag (matching `package.json`) runs typecheck, lint, tests, and the V2 smoke in parallel; if they pass, the publish job builds the package, runs `npm publish`, and creates the GitHub release. Merging to `main` publishes only a `dev` snapshot (`X.Y.Z-dev.N.sha` under the `dev` dist-tag, no git tag or GitHub release); `latest` changes only on a tag.
 
 Before the first automated publish, configure the package on npm:
 
@@ -323,7 +323,6 @@ Codex goal mode has deeper runtime integration for thread lifecycle control. Thi
 
 The goal sidebar shows the current status, elapsed time, token usage, auto-continue count, latest checkpoint, latest status message, stop reason, and objective when a goal is active, paused, or safety-limited. It checks the shared goal state file every second so usage and checkpoints stay current during a long run. Closed goals remain visible briefly through the latest tool state as achieved or unmet.
 
-
 ### Zed and ACP lifecycle boundaries
 
 Cancelling an active goal from an ACP client is durable when OpenCode emits the user-cancellation events described above. The plugin prevents subsequent goal continuations, including callbacks still preparing a prompt when cancellation arrives. OpenCode owns cancellation of in-flight model requests, tools, subprocesses, and already submitted prompts; the plugin cannot guarantee process termination if the host does not abort them or does not publish a cancellation signal. It does not interpret ordinary idle events, provider-error text, or completed tool calls as user cancellation.
@@ -341,3 +340,63 @@ Goal tools publish standard ACP plan entries in `metadata.acp.plan`, with richer
 The Promise-based persistence layer uses Effect 3 under the private `effect-goal-state` npm alias. This keeps it separate from modern OpenCode's shared Effect 4 SDK runtime. It remains an external runtime dependency, and no private Effect values cross the plugin API.
 
 ACP permits one pending prompt per session. While a goal command is open, use Cancel to interrupt it; `/pause_goal` cannot be submitted as a second ACP prompt until that request ends.
+
+## Linting & Formatting
+
+This project uses a self-contained lint/format bundle rooted in `scripts/style.sh`. Run it directly, via the package-manager aliases below, or wire it into CI.
+
+### One-command bootstrap
+
+If you cloned this repo fresh and `scripts/style.sh` is missing (it ships managed), re-run `ycc:formatters --sync` from Claude Code to reinstall the bundle.
+
+### Daily commands
+
+```bash
+./scripts/style.sh lint                  # full lint pass (all detected languages)
+./scripts/style.sh lint --fix            # auto-fix what is auto-fixable
+./scripts/style.sh lint --modified       # staged + unstaged + untracked
+./scripts/style.sh lint --staged         # only files staged in the git index
+./scripts/style.sh lint --unstaged       # only unstaged + untracked changes
+./scripts/style.sh lint --fix --modified # fast pre-push loop
+./scripts/style.sh format                # format everything
+./scripts/style.sh format --modified     # format modified files
+./scripts/style.sh format --staged       # format only staged files
+./scripts/style.sh format --unstaged     # format only unstaged + untracked
+```
+
+### npm aliases
+
+```bash
+npm run lint
+npm run lint:modified
+npm run lint:staged
+npm run lint:unstaged
+npm run lint:fix
+npm run lint:fix:modified
+npm run format
+npm run format:modified
+npm run format:staged
+npm run format:unstaged
+```
+
+### Per-language tools
+
+- **TypeScript / JavaScript**: `@biomejs/biome` for lint + format + import sort on JS/TS/CSS/JSON/JSONC. Runs `biome ci` in CI. `tsc --noEmit` runs when `tsconfig*.json` is present.
+
+- **Docs**: `markdownlint` + `prettier` (`.markdownlint.json`, `.prettierrc`) for Markdown/YAML. In docs-only repos, Prettier also owns JSON/JSONC.
+
+- **Shell**: `shellcheck --severity=warning` on `*.sh`.
+
+### CI
+
+To wire lint into CI, run `ycc:formatters --ci` (installs both `lint.yml` and `lint-autofix.yml`) or pair it with `--no-autofix` to skip the autofix workflow.
+
+### Pre-commit hook (optional)
+
+A pre-commit hook is installed. It runs `./scripts/style.sh lint --modified --fix` before every commit. To bypass once: `git commit --no-verify`.
+
+### Advanced
+
+- **Upgrade the bundle**: re-run `ycc:formatters --sync` from Claude Code. This prunes stale managed files and copies the latest scripts.
+- **Ignore paths**: add entries to `.prettierignore`, `.markdownlintignore`, `.gitignore`, or tool-native ignore keys (`ruff exclude`, `biome files.ignore`, `.golangci.yml issues.exclude-rules`).
+- **Modified-only mode** reads `git diff --name-only HEAD` — untracked files are included when `scripts/lib/modified-files.sh` sees them with `git status --porcelain`.

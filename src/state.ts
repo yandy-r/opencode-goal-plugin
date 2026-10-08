@@ -4,12 +4,25 @@ import { mkdir, readFile } from "node:fs/promises"
 import { dirname } from "node:path"
 import { Data, Effect, Schema } from "effect-goal-state"
 import { atomicWriteFile } from "./atomic-write"
+import {
+  type GoalPlan,
+  type GoalPlanInput,
+  GoalPlanSchema,
+  goalPlanProgress,
+  reviseGoalPlan,
+} from "./goal-plan"
 import { statePath } from "./state-path"
-import { GoalPlanSchema, goalPlanProgress, reviseGoalPlan, type GoalPlan, type GoalPlanInput } from "./goal-plan"
 
 export { statePath } from "./state-path"
 
-export type GoalStatus = "active" | "paused" | "budgetLimited" | "usageLimited" | "complete" | "unmet" | "cancelled"
+export type GoalStatus =
+  | "active"
+  | "paused"
+  | "budgetLimited"
+  | "usageLimited"
+  | "complete"
+  | "unmet"
+  | "cancelled"
 export type MutableGoalStatus = "active" | "paused"
 export type GoalHistoryType =
   | "created"
@@ -225,17 +238,30 @@ const UsageTrackerSchema = Schema.Struct({
   pendingBaseline: Schema.optionalWith(Schema.Unknown, { default: () => null }),
   pendingBaseTokens: Schema.optionalWith(Schema.Unknown, { default: () => null }),
 })
-const PlanSchema = Schema.declare((value: unknown): value is GoalPlan => GoalPlanSchema.safeParse(value).success)
+const PlanSchema = Schema.declare(
+  (value: unknown): value is GoalPlan => GoalPlanSchema.safeParse(value).success,
+)
 const GoalSchema = Schema.Struct({
   id: Schema.optionalWith(Schema.String, { default: () => "" }),
   sessionID: Schema.String,
   objective: Schema.String,
   plan: Schema.optionalWith(Schema.NullOr(PlanSchema), { default: () => null }),
   planRevision: Schema.optionalWith(Schema.Number, { default: () => 0 }),
-  status: Schema.Literal("active", "paused", "budgetLimited", "usageLimited", "complete", "unmet", "cancelled"),
+  status: Schema.Literal(
+    "active",
+    "paused",
+    "budgetLimited",
+    "usageLimited",
+    "complete",
+    "unmet",
+    "cancelled",
+  ),
   tokenBudget: NullableNumber,
   tokensUsed: Schema.Number,
-  usageTrackers: Schema.optionalWith(Schema.Record({ key: Schema.String, value: UsageTrackerSchema }), { default: () => ({}) }),
+  usageTrackers: Schema.optionalWith(
+    Schema.Record({ key: Schema.String, value: UsageTrackerSchema }),
+    { default: () => ({}) },
+  ),
   timeUsedSeconds: Schema.Number,
   createdAt: Schema.Number,
   updatedAt: Schema.Number,
@@ -250,8 +276,12 @@ const GoalSchema = Schema.Struct({
   lastStatus: Schema.optionalWith(NullableString, { default: () => null }),
   maxAutoTurns: Schema.optionalWith(NullableNumber, { default: () => null }),
   maxDurationSeconds: Schema.optionalWith(NullableNumber, { default: () => null }),
-  noProgressTokenThreshold: Schema.optionalWith(NullableNumber, { default: () => DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD }),
-  maxNoProgressTurns: Schema.optionalWith(NullableNumber, { default: () => DEFAULT_MAX_NO_PROGRESS_TURNS }),
+  noProgressTokenThreshold: Schema.optionalWith(NullableNumber, {
+    default: () => DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
+  }),
+  maxNoProgressTurns: Schema.optionalWith(NullableNumber, {
+    default: () => DEFAULT_MAX_NO_PROGRESS_TURNS,
+  }),
   noProgressTurns: Schema.optionalWith(Schema.Number, { default: () => 0 }),
   budgetWrapupSent: Schema.optionalWith(Schema.Boolean, { default: () => false }),
   stopReason: Schema.optionalWith(NullableString, { default: () => null }),
@@ -271,7 +301,15 @@ const ArchivedGoalSchema = Schema.Struct({
   objective: Schema.String,
   plan: Schema.optionalWith(Schema.NullOr(PlanSchema), { default: () => null }),
   planRevision: Schema.optionalWith(Schema.Number, { default: () => 0 }),
-  status: Schema.Literal("active", "paused", "budgetLimited", "usageLimited", "complete", "unmet", "cancelled"),
+  status: Schema.Literal(
+    "active",
+    "paused",
+    "budgetLimited",
+    "usageLimited",
+    "complete",
+    "unmet",
+    "cancelled",
+  ),
   tokenBudget: NullableNumber,
   tokensUsed: Schema.Number,
   timeUsedSeconds: Schema.Number,
@@ -291,9 +329,12 @@ const LegacyStateSchema = Schema.Struct({
 const StateSchema = Schema.Struct({
   version: Schema.Literal(2, 3),
   goals: Schema.Record({ key: Schema.String, value: GoalSchema }),
-  archives: Schema.optionalWith(Schema.Record({ key: Schema.String, value: Schema.Array(ArchivedGoalSchema) }), {
-    default: () => ({}),
-  }),
+  archives: Schema.optionalWith(
+    Schema.Record({ key: Schema.String, value: Schema.Array(ArchivedGoalSchema) }),
+    {
+      default: () => ({}),
+    },
+  ),
 })
 const PersistedStateSchema = Schema.Union(LegacyStateSchema, StateSchema)
 
@@ -342,7 +383,11 @@ function emptyState(): State {
 }
 
 function isMissingStateFile(error: unknown) {
-  return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT"
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  )
 }
 
 function mutableState(state: Schema.Schema.Type<typeof PersistedStateSchema>): State {
@@ -403,7 +448,9 @@ function parseStateText(raw: string, file: string) {
 
   if (!warnedEmptyStatePaths.has(file)) {
     warnedEmptyStatePaths.add(file)
-    console.warn(`[opencode-goal-plugin] Empty or zero-filled state file at ${file}; recovering with empty state.`)
+    console.warn(
+      `[opencode-goal-plugin] Empty or zero-filled state file at ${file}; recovering with empty state.`,
+    )
   }
   return { value: emptyState(), recoveryContent: raw || null }
 }
@@ -503,7 +550,9 @@ function readStateSync(): State {
   try {
     const file = statePath()
     const raw = readFileSync(file, "utf8")
-    return normalizeState(mutableState(Schema.decodeUnknownSync(PersistedStateSchema)(parseStateText(raw, file).value)))
+    return normalizeState(
+      mutableState(Schema.decodeUnknownSync(PersistedStateSchema)(parseStateText(raw, file).value)),
+    )
   } catch (error) {
     if (isMissingStateFile(error)) return emptyState()
     throw error
@@ -550,9 +599,14 @@ async function mutate<T>(fn: (state: State) => T | Promise<T>) {
             }
             notifyStateRecovery(notice)
           } else {
-            const unchanged = yield* verifyRecoverySourceEffect(file, recoveryContent, quarantine.quarantineFile)
+            const unchanged = yield* verifyRecoverySourceEffect(
+              file,
+              recoveryContent,
+              quarantine.quarantineFile,
+            )
             if (!unchanged) {
-              const message = "goal state changed while recovery was being quarantined; refusing to overwrite it"
+              const message =
+                "goal state changed while recovery was being quarantined; refusing to overwrite it"
               notifyStateRecovery({
                 stateFile: file,
                 quarantineFile: quarantine.quarantineFile,
@@ -585,7 +639,9 @@ async function mutate<T>(fn: (state: State) => T | Promise<T>) {
 export const DEFAULT_MAX_OBJECTIVE_CHARS = 100_000
 
 export function resolveMaxObjectiveChars(value: number | null | undefined) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_MAX_OBJECTIVE_CHARS
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : DEFAULT_MAX_OBJECTIVE_CHARS
 }
 
 function boundedText(value: string, limit: number, label: string) {
@@ -599,14 +655,20 @@ export function validateObjective(objective: string, limit = DEFAULT_MAX_OBJECTI
   return boundedText(objective, limit, "goal objective")
 }
 
-export function validateEvidence(evidence: string | null | undefined, label: string, limit = DEFAULT_MAX_OBJECTIVE_CHARS) {
+export function validateEvidence(
+  evidence: string | null | undefined,
+  label: string,
+  limit = DEFAULT_MAX_OBJECTIVE_CHARS,
+) {
   return boundedText(evidence ?? "", limit, label)
 }
 
 function normalizeState(state: State): State {
   for (const goal of Object.values(state.goals)) normalizeGoal(goal)
   for (const [sessionID, goals] of Object.entries(state.archives ?? {})) {
-    state.archives[sessionID] = goals.map(normalizeArchivedGoal).slice(-MAX_ARCHIVED_GOALS_PER_SESSION)
+    state.archives[sessionID] = goals
+      .map(normalizeArchivedGoal)
+      .slice(-MAX_ARCHIVED_GOALS_PER_SESSION)
   }
   pruneArchives(state)
   return state
@@ -636,7 +698,11 @@ function normalizeGoal(goal: Goal) {
   goal.awaitingContinuationProgress = goal.awaitingContinuationProgress === true
   goal.lastContinuationAt =
     typeof goal.lastContinuationAt === "number" && Number.isFinite(goal.lastContinuationAt)
-      ? Math.floor(goal.lastContinuationAt >= 1_000_000_000_000 ? goal.lastContinuationAt / 1000 : goal.lastContinuationAt)
+      ? Math.floor(
+          goal.lastContinuationAt >= 1_000_000_000_000
+            ? goal.lastContinuationAt / 1000
+            : goal.lastContinuationAt,
+        )
       : null
   goal.pendingAttempt = normalizePendingAttempt(goal.pendingAttempt)
   goal.continuationBaselineMessageID ??= ""
@@ -646,8 +712,10 @@ function normalizeGoal(goal: Goal) {
   goal.maxDurationSeconds = positiveIntegerOrNull(goal.maxDurationSeconds)
   goal.tokenBudget = positiveIntegerOrNull(goal.tokenBudget)
   goal.usageTrackers = normalizeUsageTrackers(goal.usageTrackers)
-  goal.noProgressTokenThreshold = positiveIntegerOrNull(goal.noProgressTokenThreshold) ?? DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD
-  goal.maxNoProgressTurns = positiveIntegerOrNull(goal.maxNoProgressTurns) ?? DEFAULT_MAX_NO_PROGRESS_TURNS
+  goal.noProgressTokenThreshold =
+    positiveIntegerOrNull(goal.noProgressTokenThreshold) ?? DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD
+  goal.maxNoProgressTurns =
+    positiveIntegerOrNull(goal.maxNoProgressTurns) ?? DEFAULT_MAX_NO_PROGRESS_TURNS
   goal.budgetWrapupSent = goal.budgetWrapupSent === true
   goal.stopReason ??= null
   return goal
@@ -660,7 +728,13 @@ function normalizeUsageTrackers(trackers: Record<string, UsageTracker> | undefin
     const baseline = nonNegativeIntegerOrNull(tracker?.baseline)
     const lastObserved = nonNegativeIntegerOrNull(tracker?.lastObserved)
     const baseTokens = nonNegativeIntegerOrNull(tracker?.baseTokens)
-    if (source && baseline != null && lastObserved != null && baseTokens != null && lastObserved >= baseline) {
+    if (
+      source &&
+      baseline != null &&
+      lastObserved != null &&
+      baseTokens != null &&
+      lastObserved >= baseline
+    ) {
       const pendingBaseline = nonNegativeIntegerOrNull(tracker.pendingBaseline)
       const pendingBaseTokens = nonNegativeIntegerOrNull(tracker.pendingBaseTokens)
       normalized[source] = {
@@ -675,18 +749,23 @@ function normalizeUsageTrackers(trackers: Record<string, UsageTracker> | undefin
   return normalized
 }
 
-function normalizePendingAttempt(attempt: PendingAttempt | null | undefined): PendingAttempt | null {
+function normalizePendingAttempt(
+  attempt: PendingAttempt | null | undefined,
+): PendingAttempt | null {
   if (!attempt || typeof attempt !== "object") return null
   return {
     id: typeof attempt.id === "string" && attempt.id ? attempt.id : randomId(),
     reservedAt:
-      typeof attempt.reservedAt === "number" && Number.isFinite(attempt.reservedAt) ? attempt.reservedAt : Date.now(),
+      typeof attempt.reservedAt === "number" && Number.isFinite(attempt.reservedAt)
+        ? attempt.reservedAt
+        : Date.now(),
     started: attempt.started === true,
     delivered: attempt.delivered === true,
     committed: attempt.committed === true,
     armNoProgress: attempt.armNoProgress !== false,
     previousLastContinuationAt:
-      typeof attempt.previousLastContinuationAt === "number" && Number.isFinite(attempt.previousLastContinuationAt)
+      typeof attempt.previousLastContinuationAt === "number" &&
+      Number.isFinite(attempt.previousLastContinuationAt)
         ? attempt.previousLastContinuationAt
         : null,
   }
@@ -696,7 +775,9 @@ function randomId() {
   return `att_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
 }
 
-function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Required<CreateGoalOptions> {
+function normalizeCreateOptions(
+  input?: number | null | CreateGoalOptions,
+): Required<CreateGoalOptions> {
   if (typeof input === "number" || input === null) {
     return {
       tokenBudget: positiveIntegerOrNull(input),
@@ -713,8 +794,10 @@ function normalizeCreateOptions(input?: number | null | CreateGoalOptions): Requ
     tokenBudget: positiveIntegerOrNull(input?.tokenBudget),
     maxAutoTurns: positiveIntegerOrNull(input?.maxAutoTurns),
     maxDurationSeconds: positiveIntegerOrNull(input?.maxDurationSeconds),
-    noProgressTokenThreshold: positiveIntegerOrNull(input?.noProgressTokenThreshold) ?? DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
-    maxNoProgressTurns: positiveIntegerOrNull(input?.maxNoProgressTurns) ?? DEFAULT_MAX_NO_PROGRESS_TURNS,
+    noProgressTokenThreshold:
+      positiveIntegerOrNull(input?.noProgressTokenThreshold) ?? DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD,
+    maxNoProgressTurns:
+      positiveIntegerOrNull(input?.maxNoProgressTurns) ?? DEFAULT_MAX_NO_PROGRESS_TURNS,
     agent: typeof input?.agent === "string" && input.agent.trim() ? input.agent.trim() : null,
     initialStatus: input?.initialStatus === "paused" ? "paused" : "active",
     maxObjectiveChars: resolveMaxObjectiveChars(input?.maxObjectiveChars),
@@ -749,7 +832,9 @@ export function snapshot(goal: Goal): GoalSnapshot {
   normalizeGoal(goal)
   const sampledAt = nowSeconds()
   const activeSeconds =
-    goal.status === "active" && goal.lastAccountedAt != null ? Math.max(0, sampledAt - goal.lastAccountedAt) : 0
+    goal.status === "active" && goal.lastAccountedAt != null
+      ? Math.max(0, sampledAt - goal.lastAccountedAt)
+      : 0
   const timeUsedSeconds = goal.timeUsedSeconds + activeSeconds
   return {
     id: goal.id,
@@ -815,7 +900,8 @@ export async function getAllGoals() {
   const state = await readState()
   const sorted = Object.values(state.goals).sort(
     (left, right) =>
-      right.updatedAt - left.updatedAt || (left.sessionID < right.sessionID ? -1 : left.sessionID > right.sessionID ? 1 : 0),
+      right.updatedAt - left.updatedAt ||
+      (left.sessionID < right.sessionID ? -1 : left.sessionID > right.sessionID ? 1 : 0),
   )
   const goals = sorted.slice(0, MAX_LISTED_GOALS).map(goalListItem)
   return { goals, total: sorted.length, truncated: sorted.length > goals.length }
@@ -880,7 +966,9 @@ function createGoalRecord(
     lastContinuationAt: null,
     continuationFailures: 0,
     pendingAttempt: null,
-    lastStatus: paused ? "Goal recorded from Plan mode; execution paused until resumed from Build mode." : "Goal set.",
+    lastStatus: paused
+      ? "Goal recorded from Plan mode; execution paused until resumed from Build mode."
+      : "Goal set.",
     maxAutoTurns: normalizedOptions.maxAutoTurns,
     maxDurationSeconds: normalizedOptions.maxDurationSeconds,
     noProgressTokenThreshold: normalizedOptions.noProgressTokenThreshold,
@@ -947,9 +1035,10 @@ function pruneArchives(state: State) {
 }
 
 function archiveGoal(state: State, goal: Goal) {
-  state.archives[goal.sessionID] = [...(state.archives[goal.sessionID] ?? []), archivedGoal(goal)].slice(
-    -MAX_ARCHIVED_GOALS_PER_SESSION,
-  )
+  state.archives[goal.sessionID] = [
+    ...(state.archives[goal.sessionID] ?? []),
+    archivedGoal(goal),
+  ].slice(-MAX_ARCHIVED_GOALS_PER_SESSION)
   pruneArchives(state)
 }
 
@@ -966,13 +1055,21 @@ function cancelGoalRecord(goal: Goal, reason: "cancelled" | "cleared" | "replace
   goal.budgetWrapupSent = false
   goal.stopReason = reason
   goal.blocker = null
-  goal.lastStatus = reason === "replaced" ? "Goal cancelled because it was replaced." : "Goal cancelled."
+  goal.lastStatus =
+    reason === "replaced" ? "Goal cancelled because it was replaced." : "Goal cancelled."
   pushHistory(goal, "cancelled", goal.lastStatus)
 }
 
-export async function createGoal(sessionID: string, objective: string, options?: number | null | CreateGoalOptions) {
+export async function createGoal(
+  sessionID: string,
+  objective: string,
+  options?: number | null | CreateGoalOptions,
+) {
   const normalizedOptions = normalizeCreateOptions(options)
-  const value = validateObjective(objective, resolveMaxObjectiveChars(normalizedOptions.maxObjectiveChars))
+  const value = validateObjective(
+    objective,
+    resolveMaxObjectiveChars(normalizedOptions.maxObjectiveChars),
+  )
   return mutate((state) => {
     const existing = state.goals[sessionID]
     if (existing && !isClosed(existing.status)) {
@@ -989,19 +1086,34 @@ export async function updateGoalObjective(
   sessionID: string,
   objective: string,
   status: MutableGoalStatus = "active",
-  options?: { agent?: string | null; planModePause?: boolean; maxObjectiveChars?: number; requestedPlanEdit?: { goalID: string; objective: string } },
+  options?: {
+    agent?: string | null
+    planModePause?: boolean
+    maxObjectiveChars?: number
+    requestedPlanEdit?: { goalID: string; objective: string }
+  },
 ) {
   const value = validateObjective(objective, resolveMaxObjectiveChars(options?.maxObjectiveChars))
-  const agent = typeof options?.agent === "string" && options.agent.trim() ? options.agent.trim() : null
+  const agent =
+    typeof options?.agent === "string" && options.agent.trim() ? options.agent.trim() : null
   const planModePause = options?.planModePause === true
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new Error("cannot update goal because this session has no goal")
-    if (isClosed(goal.status)) throw new Error("cannot update goal objective because this goal is closed; replace it instead")
+    if (isClosed(goal.status))
+      throw new Error(
+        "cannot update goal objective because this goal is closed; replace it instead",
+      )
     accountWallClock(goal)
     if (goal.objective !== value) {
-      if (goal.plan && (options?.requestedPlanEdit?.goalID !== goal.id || options.requestedPlanEdit.objective !== value)) {
-        throw new Error("editing a planned goal requires an explicit /goal edit <objective> command")
+      if (
+        goal.plan &&
+        (options?.requestedPlanEdit?.goalID !== goal.id ||
+          options.requestedPlanEdit.objective !== value)
+      ) {
+        throw new Error(
+          "editing a planned goal requires an explicit /goal edit <objective> command",
+        )
       }
       goal.plan = null
       goal.planRevision += 1
@@ -1071,7 +1183,8 @@ export async function setGoalStatus(
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new Error("cannot update goal because this session has no goal")
-    if (isClosed(goal.status)) throw new Error("cannot update goal status because this goal is closed")
+    if (isClosed(goal.status))
+      throw new Error("cannot update goal status because this goal is closed")
     if (goal.status === status) return snapshot(goal)
     if (status === "paused" && goal.status !== "active") return snapshot(goal)
     const resumesAutoTurnLimit =
@@ -1114,9 +1227,15 @@ export async function closeGoal(
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) throw new Error("cannot update goal because this session has no goal")
-    if (isClosed(goal.status)) throw new Error("cannot close goal because this goal is already closed")
-    if (input.status === "complete" && goal.plan?.phases.some((phase) => phase.status !== "completed")) {
-      throw new Error("cannot complete the overall goal while planned phases still require work or verification")
+    if (isClosed(goal.status))
+      throw new Error("cannot close goal because this goal is already closed")
+    if (
+      input.status === "complete" &&
+      goal.plan?.phases.some((phase) => phase.status !== "completed")
+    ) {
+      throw new Error(
+        "cannot complete the overall goal while planned phases still require work or verification",
+      )
     }
     accountWallClock(goal)
     const now = nowSeconds()
@@ -1168,22 +1287,37 @@ export async function updateGoalPlan(
     )
     goal.planRevision = goal.plan.revision
     goal.updatedAt = nowSeconds()
-    pushHistory(goal, "updated", `Goal plan updated (revision ${goal.planRevision}): ${input.reason}`)
+    pushHistory(
+      goal,
+      "updated",
+      `Goal plan updated (revision ${goal.planRevision}): ${input.reason}`,
+    )
     return snapshot(goal)
   })
 }
 
 export { goalPlanProgress }
 
-export async function completeGoal(sessionID: string, evidence: string, maxObjectiveChars = DEFAULT_MAX_OBJECTIVE_CHARS) {
+export async function completeGoal(
+  sessionID: string,
+  evidence: string,
+  maxObjectiveChars = DEFAULT_MAX_OBJECTIVE_CHARS,
+) {
   return closeGoal(sessionID, { status: "complete", evidence }, maxObjectiveChars)
 }
 
-export async function markGoalUnmet(sessionID: string, blocker: string, maxObjectiveChars = DEFAULT_MAX_OBJECTIVE_CHARS) {
+export async function markGoalUnmet(
+  sessionID: string,
+  blocker: string,
+  maxObjectiveChars = DEFAULT_MAX_OBJECTIVE_CHARS,
+) {
   return closeGoal(sessionID, { status: "unmet", blocker }, maxObjectiveChars)
 }
 
-export async function cancelGoal(sessionID: string, reason: "cancelled" | "replaced" = "cancelled") {
+export async function cancelGoal(
+  sessionID: string,
+  reason: "cancelled" | "replaced" = "cancelled",
+) {
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) return null
@@ -1220,7 +1354,10 @@ export async function replaceGoal(
   options?: number | null | CreateGoalOptions,
 ) {
   const normalizedOptions = normalizeCreateOptions(options)
-  const value = validateObjective(objective, resolveMaxObjectiveChars(normalizedOptions.maxObjectiveChars))
+  const value = validateObjective(
+    objective,
+    resolveMaxObjectiveChars(normalizedOptions.maxObjectiveChars),
+  )
   return mutate((state) => {
     const existing = state.goals[sessionID]
     if (existing) {
@@ -1297,7 +1434,10 @@ export async function accountUsage(
           tracker.pendingBaseline = null
           tracker.pendingBaseTokens = null
         }
-        goal.tokensUsed = Math.max(goal.tokensUsed, tracker.baseTokens + observed - tracker.baseline)
+        goal.tokensUsed = Math.max(
+          goal.tokensUsed,
+          tracker.baseTokens + observed - tracker.baseline,
+        )
       } else {
         goal.tokensUsed = Math.max(goal.tokensUsed, observed)
       }
@@ -1316,8 +1456,10 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
     const text = input.text?.trim() ?? ""
     const messageID = input.messageID?.trim() ?? ""
     const outputTokens = positiveIntegerOrNull(input.outputTokens) ?? 0
-    const threshold = positiveIntegerOrNull(input.noProgressTokenThreshold) ?? goal.noProgressTokenThreshold
-    const maxNoProgressTurns = positiveIntegerOrNull(input.maxNoProgressTurns) ?? goal.maxNoProgressTurns
+    const threshold =
+      positiveIntegerOrNull(input.noProgressTokenThreshold) ?? goal.noProgressTokenThreshold
+    const maxNoProgressTurns =
+      positiveIntegerOrNull(input.maxNoProgressTurns) ?? goal.maxNoProgressTurns
     const summary = summarizeText(text)
     const substantive = /[\p{L}\p{N}]/u.test(text)
     const previousSummary = summarizeText(goal.lastAssistantText)
@@ -1355,12 +1497,17 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
       messageID !== goal.continuationBaselineMessageID &&
       // The turn must belong to (complete at/after) the current attempt; a
       // delayed prior-turn message must not consume the evaluation.
-      (input.completedAt == null || attemptForCompletion == null || input.completedAt >= attemptForCompletion.reservedAt)
+      (input.completedAt == null ||
+        attemptForCompletion == null ||
+        input.completedAt >= attemptForCompletion.reservedAt)
     if (continuationTurnCompleted) {
       goal.awaitingContinuationProgress = false
       goal.pendingAttempt = null
-      const lowOutput = outputTokens > 0 && outputTokens < (threshold ?? DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD)
-      const changedSinceContinuation = Boolean(summary && summary !== goal.continuationBaselineSummary)
+      const lowOutput =
+        outputTokens > 0 && outputTokens < (threshold ?? DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD)
+      const changedSinceContinuation = Boolean(
+        summary && summary !== goal.continuationBaselineSummary,
+      )
       if (lowOutput && !changedSinceContinuation) {
         goal.noProgressTurns += 1
         if (maxNoProgressTurns && goal.noProgressTurns >= maxNoProgressTurns) {
@@ -1392,11 +1539,16 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
  * (the attempt is a reserved turn); if the attempt is later canceled before it
  * is actually sent, callers must roll it back with rollbackContinuationAttempt.
  */
-export async function reserveContinuation(sessionID: string, maxAutoTurns: number, minIntervalSeconds: number) {
+export async function reserveContinuation(
+  sessionID: string,
+  maxAutoTurns: number,
+  minIntervalSeconds: number,
+) {
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) return null
-    if (goal.status === "budgetLimited" || goal.status === "usageLimited") return reserveWrapup(goal)
+    if (goal.status === "budgetLimited" || goal.status === "usageLimited")
+      return reserveWrapup(goal)
     if (!canContinue(goal.status)) return null
     const now = nowSeconds()
     accountWallClock(goal, now)
@@ -1474,7 +1626,8 @@ export async function recordContinuationResult(
     const goal = state.goals[sessionID]
     if (!goal || isClosed(goal.status)) return goal ? snapshotInternal(goal) : null
     if (options?.expectedGoalID && goal.id !== options.expectedGoalID) return null
-    if (options?.expectedAttemptID && goal.pendingAttempt?.id !== options.expectedAttemptID) return null
+    if (options?.expectedAttemptID && goal.pendingAttempt?.id !== options.expectedAttemptID)
+      return null
     const now = nowSeconds()
     goal.updatedAt = now
     if (result === "success") {
@@ -1540,7 +1693,8 @@ export async function markPendingContinuationStarted(sessionID: string) {
   const state = await readState()
   const current = state.goals[sessionID]
   if (!current || current.status !== "active") return current ? snapshotInternal(current) : null
-  if (current.pendingAttempt == null || current.pendingAttempt.started) return snapshotInternal(current)
+  if (current.pendingAttempt == null || current.pendingAttempt.started)
+    return snapshotInternal(current)
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal || goal.status !== "active") return goal ? snapshotInternal(goal) : null
@@ -1559,18 +1713,27 @@ export async function markPendingContinuationStarted(sessionID: string) {
  * earlier turn can never clear a newer pending attempt. Omitting the argument
  * keeps the legacy unconditional reset for direct callers.
  */
-export async function recordToolProgress(sessionID: string, text?: string, expectedAttemptID?: string | null) {
+export async function recordToolProgress(
+  sessionID: string,
+  text?: string,
+  expectedAttemptID?: string | null,
+) {
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal || goal.status !== "active") return goal ? snapshotInternal(goal) : null
     const value = text?.trim() ?? ""
     if (!value) return snapshotInternal(goal)
-    if (goal.continuationFailures === 0 && goal.pendingAttempt == null) return snapshotInternal(goal)
+    if (goal.continuationFailures === 0 && goal.pendingAttempt == null)
+      return snapshotInternal(goal)
     // A tool call that started before the current attempt was reserved may
     // finish while a newer attempt is pending. Its output belongs to the prior
     // turn, so it must not clear the newer attempt: only clear when the
     // captured attempt matches, or when nothing is pending to protect.
-    if (goal.pendingAttempt != null && expectedAttemptID !== undefined && expectedAttemptID !== goal.pendingAttempt.id) {
+    if (
+      goal.pendingAttempt != null &&
+      expectedAttemptID !== undefined &&
+      expectedAttemptID !== goal.pendingAttempt.id
+    ) {
       return snapshotInternal(goal)
     }
     // A successful tool output is real progress for the transport: it resolves
@@ -1590,7 +1753,11 @@ function reserveWrapup(goal: Goal): InternalGoalSnapshot | null {
   if (goal.budgetWrapupSent) return null
   goal.budgetWrapupSent = true
   goal.updatedAt = nowSeconds()
-  pushHistory(goal, "limited", `${goal.status}: ${goal.stopReason ?? "goal limit reached"}; requested final handoff.`)
+  pushHistory(
+    goal,
+    "limited",
+    `${goal.status}: ${goal.stopReason ?? "goal limit reached"}; requested final handoff.`,
+  )
   return snapshotInternal(goal)
 }
 
@@ -1649,13 +1816,17 @@ function recordCheckpoint(goal: Goal, summary: string) {
 function pushHistory(goal: Goal, type: GoalHistoryType, detail: string | null | undefined) {
   const value = summarizeText(detail ?? "", 400)
   if (!value) return
-  goal.history = [...goal.history, { type, detail: value, timestamp: nowSeconds() }].slice(-MAX_HISTORY_ENTRIES)
+  goal.history = [...goal.history, { type, detail: value, timestamp: nowSeconds() }].slice(
+    -MAX_HISTORY_ENTRIES,
+  )
 }
 
 function summarizeText(text: string, limit = CHECKPOINT_CHAR_LIMIT) {
   const normalized = text.replace(/\s+/g, " ").trim()
   if (!normalized) return ""
-  return normalized.length > limit ? `${normalized.slice(0, Math.max(0, limit - 3))}...` : normalized
+  return normalized.length > limit
+    ? `${normalized.slice(0, Math.max(0, limit - 3))}...`
+    : normalized
 }
 
 function goalLimitSummary(goal: Goal) {
@@ -1664,7 +1835,9 @@ function goalLimitSummary(goal: Goal) {
     goal.maxAutoTurns == null ? null : `${goal.maxAutoTurns} auto-continue limit`,
     goal.maxDurationSeconds == null ? null : `${goal.maxDurationSeconds}s duration limit`,
   ].filter(Boolean)
-  return limits.length ? `Goal set with ${limits.join(", ")}.` : "Goal set with default continuation limits."
+  return limits.length
+    ? `Goal set with ${limits.join(", ")}.`
+    : "Goal set with default continuation limits."
 }
 
 export function estimateTokensFromText(text: string) {
@@ -1694,5 +1867,10 @@ export function formatGoal(goal: GoalSnapshot | null) {
 export function formatGoalHistory(goal: GoalSnapshot | null) {
   if (!goal) return "No goal history is available for this session."
   if (goal.history.length === 0) return "No goal history recorded yet."
-  return goal.history.map((entry) => `- [${new Date(entry.timestamp * 1000).toISOString()}] ${entry.type}: ${entry.detail}`).join("\n")
+  return goal.history
+    .map(
+      (entry) =>
+        `- [${new Date(entry.timestamp * 1000).toISOString()}] ${entry.type}: ${entry.detail}`,
+    )
+    .join("\n")
 }

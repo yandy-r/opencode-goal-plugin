@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -17,36 +19,40 @@ jobs:
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: bun install --frozen-lockfile
       - run: bun run lint
 
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: bun install --frozen-lockfile
       - run: bun run test
 
   v2-smoke:
     name: V2 Lifecycle Smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: bun install --frozen-lockfile
       - run: bun run build
       - name: Install OpenCode V2
@@ -58,6 +64,7 @@ jobs:
   publish:
     name: Publish to npm
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs:
       - typecheck
       - lint
@@ -72,20 +79,44 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: bun install --frozen-lockfile
-      - run: bun run ci:version
-      - name: Read publish version
+      - name: Resolve publish version
         id: version
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          BASE=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "v${BASE}" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${BASE}"
+              exit 1
+            fi
+            VERSION="${BASE}"
+            case "${VERSION}" in
+              *-*) NPM_TAG=next; PRERELEASE=--prerelease ;;
+              *) NPM_TAG=latest; PRERELEASE= ;;
+            esac
+            RELEASE=true
+          else
+            # Branch pushes publish a dev snapshot under the "dev" dist-tag only:
+            # no git tag, no GitHub release, and "latest" is untouched.
+            VERSION="${BASE%%-*}-dev.${GITHUB_RUN_NUMBER}.${GITHUB_SHA::7}"
+            npm version "${VERSION}" --no-git-tag-version
+            NPM_TAG=dev; PRERELEASE=; RELEASE=false
+          fi
+          {
+            echo "version=${VERSION}"
+            echo "npm_tag=${NPM_TAG}"
+            echo "prerelease=${PRERELEASE}"
+            echo "release=${RELEASE}"
+          } >> "$GITHUB_OUTPUT"
       - run: bun run build
-      - run: npm publish --ignore-scripts
+      - run: npm publish --ignore-scripts --tag "${{ steps.version.outputs.npm_tag }}"
       - name: Create GitHub release
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           cat > release-notes.md <<EOF
           Published npm version: @yandy-r/opencode-goal-plugin@${VERSION}
@@ -100,6 +131,7 @@ jobs:
 
           gh release create "v${VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --target "${GITHUB_SHA}" \
+            --verify-tag \
             --title "v${VERSION}" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md \
+            ${PRERELEASE}

@@ -1,29 +1,29 @@
 import { afterEach, beforeEach, expect, setSystemTime, spyOn, test } from "bun:test"
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   accountUsage,
-  cancelGoal,
   cancelActiveGoal,
+  cancelGoal,
   clearGoal,
   completeGoal,
   createGoal,
   DEFAULT_MAX_OBJECTIVE_CHARS,
   getAllGoals,
-  markPendingContinuationStarted,
-  recordAssistantProgress,
   getGoal,
   getGoalHistory,
   getGoalInternal,
   getGoalSync,
   markGoalUnmet,
+  markPendingContinuationStarted,
   pauseGoalForPlanMode,
+  recordAssistantProgress,
   recordContinuationResult,
   recordPromptAgent,
   recordToolProgress,
-  reserveContinuation,
   replaceGoal,
+  reserveContinuation,
   rollbackContinuationAttempt,
   setGoalStatus,
   updateGoalObjective,
@@ -65,7 +65,11 @@ test("creates, reads, pauses, resumes, completes, and clears a goal", async () =
 test("cancels, clears, and replaces goals while preserving per-session history", async () => {
   await createGoal("ses_1", "first goal", null)
   const cancelled = await cancelGoal("ses_1")
-  expect(cancelled).toMatchObject({ status: "cancelled", stopReason: "cancelled", closedAt: expect.any(Number) })
+  expect(cancelled).toMatchObject({
+    status: "cancelled",
+    stopReason: "cancelled",
+    closedAt: expect.any(Number),
+  })
   expect(await reserveContinuation("ses_1", 10, 0)).toBeNull()
 
   const replacement = await replaceGoal("ses_1", "second goal", null)
@@ -89,7 +93,10 @@ test("cancels, clears, and replaces goals while preserving per-session history",
 
 test("host cancellation observes a queued pause atomically while explicit stop can still close it", async () => {
   await createGoal("ses_1", "preserve the pause contract", null)
-  const [, result] = await Promise.all([setGoalStatus("ses_1", "paused"), cancelActiveGoal("ses_1")])
+  const [, result] = await Promise.all([
+    setGoalStatus("ses_1", "paused"),
+    cancelActiveGoal("ses_1"),
+  ])
   expect(result?.status).toBe("paused")
   expect((await setGoalStatus("ses_1", "active")).status).toBe("active")
   expect((await cancelActiveGoal("ses_1"))?.status).toBe("cancelled")
@@ -108,9 +115,17 @@ test("closed and cancelled goals cannot be edited or closed again", async () => 
 })
 
 test("archives compact goal state and writes version 3 after migrating version 1", async () => {
-  await writeFile(process.env.OPENCODE_GOAL_STATE_PATH!, JSON.stringify({ version: 1, goals: {} }), "utf8")
+  await writeFile(
+    process.env.OPENCODE_GOAL_STATE_PATH!,
+    JSON.stringify({ version: 1, goals: {} }),
+    "utf8",
+  )
   await createGoal("ses_1", "x".repeat(3_000), null)
-  await recordAssistantProgress("ses_1", { messageID: "message", text: "y".repeat(10_000), outputTokens: 100 })
+  await recordAssistantProgress("ses_1", {
+    messageID: "message",
+    text: "y".repeat(10_000),
+    outputTokens: 100,
+  })
   await completeGoal("ses_1", "e".repeat(DEFAULT_MAX_OBJECTIVE_CHARS))
   await clearGoal("ses_1")
 
@@ -120,17 +135,25 @@ test("archives compact goal state and writes version 3 after migrating version 1
   }
   expect(persisted.version).toBe(3)
   expect(String(persisted.archives.ses_1?.[0]?.objective).length).toBeLessThanOrEqual(2_000)
-  expect(String(persisted.archives.ses_1?.[0]?.completionEvidence).length).toBeLessThanOrEqual(2_000)
+  expect(String(persisted.archives.ses_1?.[0]?.completionEvidence).length).toBeLessThanOrEqual(
+    2_000,
+  )
   expect(persisted.archives.ses_1?.[0]).not.toHaveProperty("lastAssistantText")
   expect(persisted.archives.ses_1?.[0]).not.toHaveProperty("usageTrackers")
   expect(persisted.archives.ses_1?.[0]).not.toHaveProperty("pendingAttempt")
 
   persisted.archives.ses_1![0]!.completionEvidence = "z".repeat(5_000)
   await writeFile(process.env.OPENCODE_GOAL_STATE_PATH!, JSON.stringify(persisted), "utf8")
-  expect((await getGoalHistory("ses_1")).previous[0]?.completionEvidence?.length).toBeLessThanOrEqual(2_000)
+  expect(
+    (await getGoalHistory("ses_1")).previous[0]?.completionEvidence?.length,
+  ).toBeLessThanOrEqual(2_000)
   await accountUsage("missing")
-  const normalized = JSON.parse(await readFile(process.env.OPENCODE_GOAL_STATE_PATH!, "utf8")) as typeof persisted
-  expect(String(normalized.archives.ses_1?.[0]?.completionEvidence).length).toBeLessThanOrEqual(2_000)
+  const normalized = JSON.parse(
+    await readFile(process.env.OPENCODE_GOAL_STATE_PATH!, "utf8"),
+  ) as typeof persisted
+  expect(String(normalized.archives.ses_1?.[0]?.completionEvidence).length).toBeLessThanOrEqual(
+    2_000,
+  )
 })
 
 test("reads and updates planless version 3 state without downgrading or losing metadata", async () => {
@@ -142,13 +165,22 @@ test("reads and updates planless version 3 state without downgrading or losing m
   state.goals.ses_1.planRevision = 0
   await writeFile(file, JSON.stringify(state), "utf8")
 
-  expect(await getGoal("ses_1")).toMatchObject({ objective: "preserve the existing objective", plan: null, planRevision: 0 })
+  expect(await getGoal("ses_1")).toMatchObject({
+    objective: "preserve the existing objective",
+    plan: null,
+    planRevision: 0,
+  })
   expect(getGoalSync("ses_1")).toMatchObject({ plan: null, planRevision: 0 })
   await accountUsage("ses_1", 20)
   await setGoalStatus("ses_1", "paused")
   const updated = JSON.parse(await readFile(file, "utf8"))
   expect(updated.version).toBe(3)
-  expect(updated.goals.ses_1).toMatchObject({ plan: null, planRevision: 0, tokensUsed: 20, status: "paused" })
+  expect(updated.goals.ses_1).toMatchObject({
+    plan: null,
+    planRevision: 0,
+    tokensUsed: 20,
+    status: "paused",
+  })
 
   await clearGoal("ses_1")
   expect((await getGoalHistory("ses_1")).previous[0]).toMatchObject({ plan: null, planRevision: 0 })
@@ -160,7 +192,11 @@ test("rejects malformed plans and unknown future state versions without rewritin
   const file = process.env.OPENCODE_GOAL_STATE_PATH!
   const original = JSON.parse(await readFile(file, "utf8"))
   for (const incompatible of [
-    { ...original, version: 3, goals: { ses_1: { ...original.goals.ses_1, plan: { phases: [] }, planRevision: 1 } } },
+    {
+      ...original,
+      version: 3,
+      goals: { ses_1: { ...original.goals.ses_1, plan: { phases: [] }, planRevision: 1 } },
+    },
     { ...original, version: 4 },
   ]) {
     const content = JSON.stringify(incompatible)
@@ -289,15 +325,19 @@ test("objective and evidence limits use submitted Unicode code points per call",
   expect(() => validateObjective(" ", 1)).toThrow("must not be empty")
   expect(() => validateObjective("   ", 3)).toThrow("must not be empty")
   expect(() => validateObjective("ab", 1)).toThrow("at most 1 characters")
-  expect(() => validateEvidence("😀😀", "blocker", 1)).toThrow("blocker must be at most 1 characters")
+  expect(() => validateEvidence("😀😀", "blocker", 1)).toThrow(
+    "blocker must be at most 1 characters",
+  )
   expect(validateEvidence(" ok ", "completion evidence", 4)).toBe("ok")
 
   const created = await createGoal("ses_limit", "😀", { maxObjectiveChars: 1 })
   expect(created.objective).toBe("😀")
-  await expect(createGoal("ses_over", "ab", { maxObjectiveChars: 1 })).rejects.toThrow("at most 1 characters")
-  await expect(createGoal("ses_default", "x".repeat(DEFAULT_MAX_OBJECTIVE_CHARS + 1))).rejects.toThrow(
-    "at most 100000 characters",
+  await expect(createGoal("ses_over", "ab", { maxObjectiveChars: 1 })).rejects.toThrow(
+    "at most 1 characters",
   )
+  await expect(
+    createGoal("ses_default", "x".repeat(DEFAULT_MAX_OBJECTIVE_CHARS + 1)),
+  ).rejects.toThrow("at most 100000 characters")
 
   await createGoal("ses_close", "keep")
   await expect(completeGoal("ses_close", "xy", 1)).rejects.toThrow("at most 1 characters")
@@ -320,7 +360,9 @@ test("cumulative usage establishes a private tracker and grows by its delta acro
 
   const first = await accountUsage("ses_1", 100, { cumulative: true, source: "messages" })
   expect(first?.tokensUsed).toBe(20)
-  const persistedAfterFirst = JSON.parse(await readFile(process.env.OPENCODE_GOAL_STATE_PATH!, "utf8")) as {
+  const persistedAfterFirst = JSON.parse(
+    await readFile(process.env.OPENCODE_GOAL_STATE_PATH!, "utf8"),
+  ) as {
     goals: Record<string, { usageTrackers?: Record<string, unknown> }>
   }
   expect(persistedAfterFirst.goals.ses_1?.usageTrackers?.messages).toEqual({
@@ -353,8 +395,12 @@ test("a transient cumulative dip does not inflate usage when the source recovers
   await accountUsage("ses_1", 100, { cumulative: true, source: "messages" })
   await accountUsage("ses_1", 110, { cumulative: true, source: "messages" })
 
-  expect((await accountUsage("ses_1", 0, { cumulative: true, source: "messages" }))?.tokensUsed).toBe(10)
-  expect((await accountUsage("ses_1", 115, { cumulative: true, source: "messages" }))?.tokensUsed).toBe(15)
+  expect(
+    (await accountUsage("ses_1", 0, { cumulative: true, source: "messages" }))?.tokensUsed,
+  ).toBe(10)
+  expect(
+    (await accountUsage("ses_1", 115, { cumulative: true, source: "messages" }))?.tokensUsed,
+  ).toBe(15)
 })
 
 test("independent cumulative sources do not add overlapping usage", async () => {
@@ -377,11 +423,19 @@ test("an explicit initial baseline counts the first cumulative observation delta
     source: "steps",
     initialBaseline: 1_000,
   })
-  const observed = await accountUsage("ses_1", 1_040, { cumulative: true, source: "steps", initialBaseline: 1_030 })
+  const observed = await accountUsage("ses_1", 1_040, {
+    cumulative: true,
+    source: "steps",
+    initialBaseline: 1_030,
+  })
 
   expect(observed?.tokensUsed).toBe(40)
 
-  const afterRestart = await accountUsage("ses_1", 20, { cumulative: true, source: "steps", initialBaseline: 0 })
+  const afterRestart = await accountUsage("ses_1", 20, {
+    cumulative: true,
+    source: "steps",
+    initialBaseline: 0,
+  })
   expect(afterRestart?.tokensUsed).toBe(60)
 })
 
@@ -389,7 +443,11 @@ test("an explicit baseline preserves usage for legacy goals without a tracker", 
   await createGoal("ses_1", "continue after upgrade", null)
   await accountUsage("ses_1", 50)
 
-  const observed = await accountUsage("ses_1", 2, { cumulative: true, source: "steps", initialBaseline: 0 })
+  const observed = await accountUsage("ses_1", 2, {
+    cumulative: true,
+    source: "steps",
+    initialBaseline: 0,
+  })
 
   expect(observed?.tokensUsed).toBe(52)
 })
@@ -435,7 +493,13 @@ test("invalid persisted usage trackers are discarded", async () => {
     goals: Record<string, { usageTrackers?: Record<string, unknown> }>
   }
   expect(rewritten.goals.ses_1?.usageTrackers).toEqual({
-    valid: { baseline: 10, lastObserved: 20, baseTokens: 5, pendingBaseline: null, pendingBaseTokens: null },
+    valid: {
+      baseline: 10,
+      lastObserved: 20,
+      baseTokens: 5,
+      pendingBaseline: null,
+      pendingBaseTokens: null,
+    },
   })
 })
 
@@ -501,12 +565,24 @@ test("a generic status update cannot renew the auto-turn limit", async () => {
 
 test("generic assistant observations record checkpoints but never pause the goal", async () => {
   await createGoal("ses_1", "continue", { noProgressTokenThreshold: 50, maxNoProgressTurns: 2 })
-  const first = await recordAssistantProgress("ses_1", { messageID: "m1", text: "Inspected the repo", outputTokens: 10 })
+  const first = await recordAssistantProgress("ses_1", {
+    messageID: "m1",
+    text: "Inspected the repo",
+    outputTokens: 10,
+  })
   expect(first?.lastCheckpoint?.summary).toBe("Inspected the repo")
   expect(first?.status).toBe("active")
 
-  await recordAssistantProgress("ses_1", { messageID: "m2", text: "Checked PTY status", outputTokens: 15 })
-  const observed = await recordAssistantProgress("ses_1", { messageID: "m3", text: "Checked PTY status", outputTokens: 15 })
+  await recordAssistantProgress("ses_1", {
+    messageID: "m2",
+    text: "Checked PTY status",
+    outputTokens: 15,
+  })
+  const observed = await recordAssistantProgress("ses_1", {
+    messageID: "m3",
+    text: "Checked PTY status",
+    outputTokens: 15,
+  })
 
   expect(observed?.status).toBe("active")
   expect(observed?.noProgressTurns).toBe(0)
@@ -515,7 +591,11 @@ test("generic assistant observations record checkpoints but never pause the goal
 
 test("no-progress pause only counts goal continuation turns", async () => {
   await createGoal("ses_1", "continue", { noProgressTokenThreshold: 50, maxNoProgressTurns: 2 })
-  await recordAssistantProgress("ses_1", { messageID: "m0", text: "Working on it", outputTokens: 100 })
+  await recordAssistantProgress("ses_1", {
+    messageID: "m0",
+    text: "Working on it",
+    outputTokens: 100,
+  })
 
   await reserveContinuation("ses_1", 10, 0)
   await recordContinuationResult("ses_1", "success", 3)
@@ -543,11 +623,20 @@ test("no-progress pause only counts goal continuation turns", async () => {
 
 test("progressing continuation turns reset the no-progress counter", async () => {
   await createGoal("ses_1", "continue", { noProgressTokenThreshold: 50, maxNoProgressTurns: 2 })
-  await recordAssistantProgress("ses_1", { messageID: "m0", text: "Working on it", outputTokens: 100 })
+  await recordAssistantProgress("ses_1", {
+    messageID: "m0",
+    text: "Working on it",
+    outputTokens: 100,
+  })
 
   await reserveContinuation("ses_1", 10, 0)
   await recordContinuationResult("ses_1", "success", 3)
-  await recordAssistantProgress("ses_1", { messageID: "m1", text: "Working on it", outputTokens: 10, evaluateContinuation: true })
+  await recordAssistantProgress("ses_1", {
+    messageID: "m1",
+    text: "Working on it",
+    outputTokens: 10,
+    evaluateContinuation: true,
+  })
 
   await reserveContinuation("ses_1", 10, 0)
   await recordContinuationResult("ses_1", "success", 3)
@@ -564,11 +653,19 @@ test("progressing continuation turns reset the no-progress counter", async () =>
 
 test("generic observations during a continuation turn do not consume the evaluation", async () => {
   await createGoal("ses_1", "continue", { noProgressTokenThreshold: 50, maxNoProgressTurns: 2 })
-  await recordAssistantProgress("ses_1", { messageID: "m0", text: "Working on it", outputTokens: 100 })
+  await recordAssistantProgress("ses_1", {
+    messageID: "m0",
+    text: "Working on it",
+    outputTokens: 100,
+  })
   await reserveContinuation("ses_1", 10, 0)
   await recordContinuationResult("ses_1", "success", 3)
 
-  const observed = await recordAssistantProgress("ses_1", { messageID: "m1", text: "Working on it", outputTokens: 10 })
+  const observed = await recordAssistantProgress("ses_1", {
+    messageID: "m1",
+    text: "Working on it",
+    outputTokens: 10,
+  })
   expect(observed?.noProgressTurns).toBe(0)
   expect(observed?.awaitingContinuationProgress).toBe(true)
 
@@ -584,7 +681,11 @@ test("generic observations during a continuation turn do not consume the evaluat
 
 test("failed continuation sends do not arm no-progress evaluation", async () => {
   await createGoal("ses_1", "continue", { noProgressTokenThreshold: 50, maxNoProgressTurns: 2 })
-  await recordAssistantProgress("ses_1", { messageID: "m0", text: "Checking status", outputTokens: 100 })
+  await recordAssistantProgress("ses_1", {
+    messageID: "m0",
+    text: "Checking status",
+    outputTokens: 100,
+  })
 
   const reserved = await reserveContinuation("ses_1", 10, 0)
   expect(reserved?.awaitingContinuationProgress).toBe(false)
@@ -603,7 +704,10 @@ test("failed continuation sends do not arm no-progress evaluation", async () => 
 })
 
 test("creates a paused planning goal and records the prompting agent", async () => {
-  const created = await createGoal("ses_1", "implement the feature", { agent: "plan", initialStatus: "paused" })
+  const created = await createGoal("ses_1", "implement the feature", {
+    agent: "plan",
+    initialStatus: "paused",
+  })
 
   expect(created.status).toBe("paused")
   expect(created.lastPromptAgent).toBe("plan")
@@ -758,7 +862,9 @@ test("quarantines non-empty whitespace and BOM-only state before replacing it", 
 
     await createGoal(`ses_${index}`, "recover padded state", null)
 
-    const quarantines = (await readdir(dir)).filter((name) => name.startsWith(`goals-${index}.json.corrupt-`))
+    const quarantines = (await readdir(dir)).filter((name) =>
+      name.startsWith(`goals-${index}.json.corrupt-`),
+    )
     expect(quarantines).toHaveLength(1)
     expect(await readFile(join(dir, quarantines[0]!), "utf8")).toBe(damaged)
   }

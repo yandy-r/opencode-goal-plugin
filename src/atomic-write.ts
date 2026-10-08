@@ -106,7 +106,8 @@ async function bestEffort(action: () => void | Promise<void>): Promise<void> {
 }
 
 /** Production wait between rename retries: short, bounded backoff. */
-export const defaultSleep = (ms: number): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, ms))
+export const defaultSleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 /** Production directory opener: opens the directory read-only. */
 export const defaultDirOpenOps: DirOpenOps = {

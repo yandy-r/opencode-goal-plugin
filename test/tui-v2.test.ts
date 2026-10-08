@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync, unlinkSync } from "node:fs"
 import { rename, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { DEFAULT_THEME, resolveThemeDocument, type ResolvedTheme } from "@opencode/theme/tui"
+import type { SessionMessageAssistantTool, SessionMessageInfo } from "@opencode/client"
+import { DEFAULT_THEME, type ResolvedTheme, resolveThemeDocument } from "@opencode/theme/tui"
 import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import { createStore, type Store } from "solid-js/store"
-import type { SessionMessageAssistantTool, SessionMessageInfo } from "@opencode/client"
 import plugin, {
   goalFromV2Messages,
   liveTimeUsedSeconds,
@@ -163,11 +163,20 @@ type MockContext = {
   ui: {
     dialog: {
       set: (options: { size?: string }) => void
-      select: (options: { title: string; placeholder: string; options: readonly { title: string; value: string }[] }) => Promise<string | undefined>
+      select: (options: {
+        title: string
+        placeholder: string
+        options: readonly { title: string; value: string }[]
+      }) => Promise<string | undefined>
       clear: () => void
     }
     toast: {
-      show: (options: { title?: string; message: string; variant?: string; duration?: number }) => void
+      show: (options: {
+        title?: string
+        message: string
+        variant?: string
+        duration?: number
+      }) => void
     }
     format: { path: (value: string) => string }
     router: {
@@ -176,7 +185,10 @@ type MockContext = {
       current: () => { type: string; sessionID?: string }
     }
     tabs: unknown
-    slot: (options: { append: string; render: (props: { sessionID: string }) => unknown }) => () => void
+    slot: (options: {
+      append: string
+      render: (props: { sessionID: string }) => unknown
+    }) => () => void
   }
 }
 
@@ -187,7 +199,11 @@ function makeMockContext(overrides: Partial<MockContext> = {}): {
   layers: Array<() => MockKeymapLayer>
   promptCalls: Array<{ sessionID: string; text: string }>
   toasts: Array<{ title?: string; message: string; variant?: string; duration?: number }>
-  selectCalls: Array<{ title: string; placeholder: string; options: readonly { title: string; value: string }[] }>
+  selectCalls: Array<{
+    title: string
+    placeholder: string
+    options: readonly { title: string; value: string }[]
+  }>
   setMessages: (messages: SessionMessageInfo[]) => void
   setRoute: (route: { type: string; sessionID?: string }) => void
 } {
@@ -196,11 +212,21 @@ function makeMockContext(overrides: Partial<MockContext> = {}): {
   const layers: Array<() => MockKeymapLayer> = []
   const promptCalls: Array<{ sessionID: string; text: string }> = []
   const toasts: Array<{ title?: string; message: string; variant?: string; duration?: number }> = []
-  const selectCalls: Array<{ title: string; placeholder: string; options: readonly { title: string; value: string }[] }> = []
+  const selectCalls: Array<{
+    title: string
+    placeholder: string
+    options: readonly { title: string; value: string }[]
+  }> = []
   const [messages, setMessages] = createSignal<SessionMessageInfo[]>([])
   let route: { type: string; sessionID?: string } = { type: "home" }
 
-  const memories = new Map<string, [Store<{ goal: GoalSnapshot | null }>, (mutation: (draft: { goal: GoalSnapshot | null }) => void) => void]>()
+  const memories = new Map<
+    string,
+    [
+      Store<{ goal: GoalSnapshot | null }>,
+      (mutation: (draft: { goal: GoalSnapshot | null }) => void) => void,
+    ]
+  >()
 
   const mock: MockContext = {
     options: {},
@@ -236,7 +262,9 @@ function makeMockContext(overrides: Partial<MockContext> = {}): {
       memory(key, options) {
         let entry = memories.get(key)
         if (!entry) {
-          const [store, setStore] = createStore<{ goal: GoalSnapshot | null }>({ ...options.initial })
+          const [store, setStore] = createStore<{ goal: GoalSnapshot | null }>({
+            ...options.initial,
+          })
           entry = [
             store,
             (mutation) => {
@@ -394,8 +422,12 @@ test("V2 setup registers sidebar.content and app slots and cleanup disposes them
 test("goalFromV2Messages parses the newest completed goal tool output from text ToolContent", () => {
   const snapshot = goal({ status: "paused", objective: "paused goal", lastStatus: "Goal paused." })
   const messages = [
-    assistantMessage("created", [goalTool("create_goal", JSON.stringify({ goal: goal({ objective: "first goal" }) }))]),
-    assistantMessage("paused", [goalTool("update_goal_status", JSON.stringify({ goal: snapshot }))]),
+    assistantMessage("created", [
+      goalTool("create_goal", JSON.stringify({ goal: goal({ objective: "first goal" }) })),
+    ]),
+    assistantMessage("paused", [
+      goalTool("update_goal_status", JSON.stringify({ goal: snapshot })),
+    ]),
   ]
 
   const result = goalFromV2Messages(messages)
@@ -443,7 +475,9 @@ test("goalFromV2Messages returns null after a completed clear_goal", () => {
 test("goalFromV2Messages returns undefined when no goal tool output exists", () => {
   expect(goalFromV2Messages([])).toBeUndefined()
   expect(goalFromV2Messages([assistantMessage("plain", [])])).toBeUndefined()
-  expect(goalFromV2Messages([{ id: "user", type: "user", time: { created: 0 } } as SessionMessageInfo])).toBeUndefined()
+  expect(
+    goalFromV2Messages([{ id: "user", type: "user", time: { created: 0 } } as SessionMessageInfo]),
+  ).toBeUndefined()
 })
 
 test("V2 sidebar renders the parsed goal from session messages", async () => {
@@ -453,10 +487,18 @@ test("V2 sidebar renders the parsed goal from session messages", async () => {
   expect(sidebar).toBeTypeOf("function")
 
   setMessages([
-    assistantMessage("created", [goalTool("create_goal", JSON.stringify({ goal: goal({ objective: "ship the v2 milestone", status: "paused" }) }))]),
+    assistantMessage("created", [
+      goalTool(
+        "create_goal",
+        JSON.stringify({ goal: goal({ objective: "ship the v2 milestone", status: "paused" }) }),
+      ),
+    ]),
   ])
 
-  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, { width: 80, height: 20 })
+  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, {
+    width: 80,
+    height: 20,
+  })
   let destroyed = false
   try {
     await setup.renderOnce()
@@ -478,10 +520,19 @@ test("V2 sidebar refreshes persisted usage and checkpoint without a new goal too
   const { mock, slots, setMessages } = makeMockContext()
   const cleanup = setupTuiV2(mock as never)
   const sidebar = slots.get("sidebar.content")
-  setMessages([assistantMessage("created", [goalTool("create_goal", JSON.stringify({ goal: initial }))])])
-  await writeGoalState({ version: 2, goals: { session: { ...initial, lastAccountedAt: 100 } }, archives: {} })
+  setMessages([
+    assistantMessage("created", [goalTool("create_goal", JSON.stringify({ goal: initial }))]),
+  ])
+  await writeGoalState({
+    version: 2,
+    goals: { session: { ...initial, lastAccountedAt: 100 } },
+    archives: {},
+  })
 
-  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, { width: 80, height: 20 })
+  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, {
+    width: 80,
+    height: 20,
+  })
   try {
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("Tokens: 0")
@@ -493,13 +544,22 @@ test("V2 sidebar refreshes persisted usage and checkpoint without a new goal too
       lastCheckpoint: { summary: "parser verified", timestamp: 101 },
       updatedAt: 101,
     })
-    await writeGoalState({ version: 2, goals: { session: { ...updated, lastAccountedAt: 101 } }, archives: {} })
+    await writeGoalState({
+      version: 2,
+      goals: { session: { ...updated, lastAccountedAt: 101 } },
+      archives: {},
+    })
 
     const deadline = Date.now() + 5000
     while (Date.now() < deadline) {
       await setup.flush()
       const frame = setup.captureCharFrame()
-      if (frame.includes("Tokens: 42") && frame.includes("Auto-continues: 2") && frame.includes("parser verified")) break
+      if (
+        frame.includes("Tokens: 42") &&
+        frame.includes("Auto-continues: 2") &&
+        frame.includes("parser verified")
+      )
+        break
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
     const frame = setup.captureCharFrame()
@@ -516,10 +576,19 @@ test("V2 sidebar removes a goal when the persisted session entry is cleared", as
   const initial = goal({ objective: "goal to clear" })
   const { mock, slots, setMessages } = makeMockContext()
   const cleanup = setupTuiV2(mock as never)
-  setMessages([assistantMessage("created", [goalTool("create_goal", JSON.stringify({ goal: initial }))])])
-  await writeGoalState({ version: 2, goals: { session: { ...initial, tokensUsed: 1, lastAccountedAt: 100 } }, archives: {} })
+  setMessages([
+    assistantMessage("created", [goalTool("create_goal", JSON.stringify({ goal: initial }))]),
+  ])
+  await writeGoalState({
+    version: 2,
+    goals: { session: { ...initial, tokensUsed: 1, lastAccountedAt: 100 } },
+    archives: {},
+  })
 
-  const setup = await testRender(() => slots.get("sidebar.content")?.({ sessionID: "session" }) as never, { width: 80, height: 20 })
+  const setup = await testRender(
+    () => slots.get("sidebar.content")?.({ sessionID: "session" }) as never,
+    { width: 80, height: 20 },
+  )
   try {
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("goal to clear")
@@ -554,7 +623,6 @@ test("V2 persisted reader distinguishes cleared sessions from unreadable state",
   expect(await readPersistedGoal("session")).toBeUndefined()
 })
 
-
 test("V2 TUI uses zh-CN labels and palette text when locale is configured", async () => {
   const { mock, slots, layers, setMessages } = makeMockContext({ options: { locale: "zh-CN" } })
   const cleanup = setupTuiV2(mock as never)
@@ -562,12 +630,21 @@ test("V2 TUI uses zh-CN labels and palette text when locale is configured", asyn
   const app = slots.get("app")
   setMessages([
     assistantMessage("created", [
-      goalTool("create_goal", JSON.stringify({ goal: goal({ objective: "完成中文界面", status: "paused" }) })),
+      goalTool(
+        "create_goal",
+        JSON.stringify({ goal: goal({ objective: "完成中文界面", status: "paused" }) }),
+      ),
     ]),
   ])
 
-  const sidebarRender = await testRender(() => sidebar?.({ sessionID: "session" }) as never, { width: 80, height: 20 })
-  const appRender = await testRender(() => app?.({ sessionID: "" }) as never, { width: 80, height: 20 })
+  const sidebarRender = await testRender(() => sidebar?.({ sessionID: "session" }) as never, {
+    width: 80,
+    height: 20,
+  })
+  const appRender = await testRender(() => app?.({ sessionID: "" }) as never, {
+    width: 80,
+    height: 20,
+  })
   try {
     await sidebarRender.renderOnce()
     await appRender.renderOnce()
@@ -594,11 +671,17 @@ test("V2 sidebar shows a completion badge for complete goals", async () => {
 
   setMessages([
     assistantMessage("completed", [
-      goalTool("update_goal", JSON.stringify({ goal: goal({ status: "complete", completionEvidence: "verified" }) })),
+      goalTool(
+        "update_goal",
+        JSON.stringify({ goal: goal({ status: "complete", completionEvidence: "verified" }) }),
+      ),
     ]),
   ])
 
-  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, { width: 80, height: 20 })
+  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, {
+    width: 80,
+    height: 20,
+  })
   let destroyed = false
   try {
     await setup.renderOnce()
@@ -615,14 +698,19 @@ test("V2 sidebar reacts when goal tool results arrive after mount", async () => 
   const { mock, slots, setMessages } = makeMockContext()
   const cleanup = setupTuiV2(mock as never)
   const sidebar = slots.get("sidebar.content")
-  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, { width: 80, height: 20 })
+  const setup = await testRender(() => sidebar?.({ sessionID: "session" }) as never, {
+    width: 80,
+    height: 20,
+  })
   let destroyed = false
   try {
     await setup.renderOnce()
     expect(setup.captureCharFrame()).not.toContain("late goal")
 
     setMessages([
-      assistantMessage("created", [goalTool("create_goal", JSON.stringify({ goal: goal({ objective: "late goal" }) }))]),
+      assistantMessage("created", [
+        goalTool("create_goal", JSON.stringify({ goal: goal({ objective: "late goal" }) })),
+      ]),
     ])
     await setup.flush()
     expect(setup.captureCharFrame()).toContain("late goal")
@@ -630,7 +718,10 @@ test("V2 sidebar reacts when goal tool results arrive after mount", async () => 
 
     setMessages([
       assistantMessage("paused", [
-        goalTool("update_goal_status", JSON.stringify({ goal: goal({ objective: "late goal", status: "paused" }) })),
+        goalTool(
+          "update_goal_status",
+          JSON.stringify({ goal: goal({ objective: "late goal", status: "paused" }) }),
+        ),
       ]),
     ])
     await setup.flush()
@@ -671,7 +762,8 @@ test("V2 keymap layer registers the goal palette command when the app slot rende
 })
 
 test("V2 palette command prompts the agent through client.session.prompt after dialog.select", async () => {
-  const { mock, slots, layers, setMessages, setRoute, selectCalls, promptCalls, toasts } = makeMockContext()
+  const { mock, slots, layers, setMessages, setRoute, selectCalls, promptCalls, toasts } =
+    makeMockContext()
   mock.ui.dialog.select = async (options) => {
     selectCalls.push(options)
     return "resume"
@@ -682,7 +774,10 @@ test("V2 palette command prompts the agent through client.session.prompt after d
 
   setMessages([
     assistantMessage("paused", [
-      goalTool("update_goal_status", JSON.stringify({ goal: goal({ status: "paused", objective: "resume me" }) })),
+      goalTool(
+        "update_goal_status",
+        JSON.stringify({ goal: goal({ status: "paused", objective: "resume me" }) }),
+      ),
     ]),
   ])
   setRoute({ type: "session", sessionID: "ses_v2" })

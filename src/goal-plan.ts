@@ -45,7 +45,10 @@ export const GoalPlanInputSchema = z
         phase.status === "completed" &&
         (!phase.verification || phase.tasks.some((task) => task.status !== "completed"))
       ) {
-        ctx.addIssue({ code: "custom", message: "completed phases require verified tasks and phase verification" })
+        ctx.addIssue({
+          code: "custom",
+          message: "completed phases require verified tasks and phase verification",
+        })
       }
       for (const task of phase.tasks) {
         if (ids.has(task.id)) ctx.addIssue({ code: "custom", message: "plan IDs must be unique" })
@@ -63,7 +66,10 @@ export const GoalPlanInputSchema = z
     }
     const firstUnfinished = plan.phases.find((phase) => phase.status !== "completed")
     if (plan.phases.some((phase) => phase.status === "in_progress" && phase !== firstUnfinished))
-      ctx.addIssue({ code: "custom", message: "verify the current phase before starting the next phase" })
+      ctx.addIssue({
+        code: "custom",
+        message: "verify the current phase before starting the next phase",
+      })
     if (runningPhases > 1 || runningTasks > 1)
       ctx.addIssue({ code: "custom", message: "choose one current phase and task" })
     if (ids.size > 576 || JSON.stringify(plan).length > 128_000)
@@ -111,28 +117,42 @@ export function reviseGoalPlan(
     for (const oldPhase of previous.phases) {
       const newPhase = next.phases.find((phase) => phase.id === oldPhase.id)
       if (!newPhase) {
-        if (oldPhase.status === "completed" || oldPhase.tasks.some((task) => task.status === "completed"))
+        if (
+          oldPhase.status === "completed" ||
+          oldPhase.tasks.some((task) => task.status === "completed")
+        )
           throw new Error("preserve verified phase and task history")
-        if (!revisitEvidence?.trim()) throw new Error("removing planned scope requires concrete revisit evidence")
+        if (!revisitEvidence?.trim())
+          throw new Error("removing planned scope requires concrete revisit evidence")
         continue
       }
       if (oldPhase.objective !== newPhase.objective && !revisitEvidence?.trim())
         throw new Error("changing planned phase scope requires concrete revisit evidence")
       if (oldPhase.status === "completed" && oldPhase.objective !== newPhase.objective)
         throw new Error("preserve verified phase objectives")
-      if (oldPhase.status === "completed" && newPhase.status !== "completed" && !revisitEvidence?.trim()) {
+      if (
+        oldPhase.status === "completed" &&
+        newPhase.status !== "completed" &&
+        !revisitEvidence?.trim()
+      ) {
         throw new Error("reopening a verified phase requires concrete revisit evidence")
       }
       for (const oldTask of oldPhase.tasks) {
         const newTask = newPhase.tasks.find((task) => task.id === oldTask.id)
         if (oldTask.status !== "completed") {
           if ((!newTask || newTask.description !== oldTask.description) && !revisitEvidence?.trim())
-            throw new Error("removing or changing planned task scope requires concrete revisit evidence")
+            throw new Error(
+              "removing or changing planned task scope requires concrete revisit evidence",
+            )
           continue
         }
         if (!newTask || newTask.description !== oldTask.description)
           throw new Error("preserve completed task IDs and descriptions across plan revisions")
-        if (oldTask.status === "completed" && newTask.status !== "completed" && !revisitEvidence?.trim()) {
+        if (
+          oldTask.status === "completed" &&
+          newTask.status !== "completed" &&
+          !revisitEvidence?.trim()
+        ) {
           throw new Error("reopening a completed task requires concrete revisit evidence")
         }
       }
@@ -165,8 +185,12 @@ export function goalPlanProgress(plan: GoalPlan) {
     currentPhaseID: current?.id ?? null,
     currentTaskID: running?.id ?? null,
     nextTaskID: next?.id ?? null,
-    nextPhaseID: plan.phases.find((phase) => phase.id !== current?.id && phase.status !== "completed")?.id ?? null,
-    completedPhaseIDs: plan.phases.filter((phase) => phase.status === "completed").map((phase) => phase.id),
+    nextPhaseID:
+      plan.phases.find((phase) => phase.id !== current?.id && phase.status !== "completed")?.id ??
+      null,
+    completedPhaseIDs: plan.phases
+      .filter((phase) => phase.status === "completed")
+      .map((phase) => phase.id),
     completedTaskIDs: plan.phases.flatMap((phase) =>
       phase.tasks.filter((task) => task.status === "completed").map((task) => task.id),
     ),

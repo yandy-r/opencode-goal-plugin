@@ -1,0 +1,23 @@
+pre-commit:
+  parallel: true
+  commands:
+    lint:
+      run: bun run lint
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}"
+    typecheck:
+      run: bun run typecheck
+      glob: "*.{ts,tsx,mts,cts}"
+    style-lint:
+      run: ./scripts/style.sh lint --staged --fix
+      stage_fixed: true
+    style-format:
+      run: ./scripts/style.sh format --staged
+      stage_fixed: true
+pre-push:
+  commands:
+    test:
+      run: bun run test
+commit-msg:
+  commands:
+    commitlint:
+      run: bunx --no-install commitlint --edit {1}

@@ -17,14 +17,14 @@ bun install
 
 Useful scripts:
 
-| Script | What it does |
-| --- | --- |
-| `bun run test` | Run the unit test suite |
+| Script                  | What it does                              |
+| ----------------------- | ----------------------------------------- |
+| `bun run test`          | Run the unit test suite                   |
 | `bun run test:coverage` | Run the test suite with a coverage report |
-| `bun run lint` | ESLint over the repo |
-| `bun run typecheck` | TypeScript `--noEmit` check |
-| `bun run build` | Bundle `src/server.ts` into `dist/` |
-| `bun run pack:dry-run` | Inspect the npm package contents |
+| `bun run lint`          | ESLint over the repo                      |
+| `bun run typecheck`     | TypeScript `--noEmit` check               |
+| `bun run build`         | Bundle `src/server.ts` into `dist/`       |
+| `bun run pack:dry-run`  | Inspect the npm package contents          |
 
 ## Project layout
 

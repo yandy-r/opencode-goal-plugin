@@ -1,15 +1,24 @@
-import type { Config, Plugin } from "@opencode-ai/plugin"
+import type { SessionMessageInfo } from "@opencode/client"
 import type * as PluginV2 from "@opencode/plugin"
 import type { Info as ToolV2Info } from "@opencode/plugin/promise/tool"
 import type { Tool as ToolSchema } from "@opencode/schema/tool"
-import type { SessionMessageInfo } from "@opencode/client"
+import type { Config, Plugin } from "@opencode-ai/plugin"
 import { z } from "zod"
 import { GoalPlanInputSchema, goalPlanEntries } from "./goal-plan"
+import type { GoalLocale, GoalMessages } from "./i18n"
+import { formatGoalHistoryPresentation, messagesFor, resolveLocale } from "./i18n"
+import {
+  compactionContext,
+  compactionContextPrefix,
+  continuationPrompt,
+  limitPrompt,
+  systemReminder,
+} from "./prompts"
 import type { GoalSnapshot, InternalGoalSnapshot, PendingAttempt } from "./state"
 import {
   accountUsage,
-  cancelGoal,
   cancelActiveGoal,
+  cancelGoal,
   clearGoal,
   completeGoal,
   createGoal,
@@ -19,28 +28,25 @@ import {
   getGoalHistory,
   getGoalInternal,
   markGoalUnmet,
+  markPendingContinuationStarted,
   onStateRecovery,
-  pauseGoalForPlanMode,
   PLAN_MODE_STOP_REASON,
+  pauseGoalForPlanMode,
   recordAssistantProgress,
   recordContinuationResult,
   recordPromptAgent,
   recordToolProgress,
-  markPendingContinuationStarted,
-  reserveContinuation,
   replaceGoal,
+  reserveContinuation,
+  resolveMaxObjectiveChars,
   rollbackContinuationAttempt,
   setGoalStatus,
-  resolveMaxObjectiveChars,
   statePath,
   updateGoalObjective,
   updateGoalPlan,
   validateEvidence,
   validateObjective,
 } from "./state"
-import type { GoalLocale, GoalMessages } from "./i18n"
-import { formatGoalHistoryPresentation, messagesFor, resolveLocale } from "./i18n"
-import { compactionContext, compactionContextPrefix, continuationPrompt, limitPrompt, systemReminder } from "./prompts"
 
 type Options = {
   auto_continue?: boolean
@@ -158,22 +164,35 @@ function isUserAbortEvent(event: { type?: string; properties?: Record<string, un
   }
   const message = properties?.info
   return (
-    event.type === "message.updated" && isRecord(message) && message.role === "assistant" &&
-    isRecord(message.error) && message.error.name === "MessageAbortedError"
+    event.type === "message.updated" &&
+    isRecord(message) &&
+    message.role === "assistant" &&
+    isRecord(message.error) &&
+    message.error.name === "MessageAbortedError"
   )
 }
 
-function continuationStillReserved(goal: InternalGoalSnapshot, current: InternalGoalSnapshot | null) {
+function continuationStillReserved(
+  goal: InternalGoalSnapshot,
+  current: InternalGoalSnapshot | null,
+) {
   return (
-    current?.id === goal.id && current.status === goal.status &&
+    current?.id === goal.id &&
+    current.status === goal.status &&
     (goal.status !== "active" || current.pendingAttempt?.id === goal.pendingAttempt?.id)
   )
 }
 
 function restrictedAgentSet(options?: Options) {
   if (options?.allow_goal_execution_from_plan === true) return new Set<string>()
-  const names = Array.isArray(options?.restricted_agents) ? options.restricted_agents : DEFAULT_RESTRICTED_AGENTS
-  return new Set(names.map((name) => (typeof name === "string" ? name.trim().toLowerCase() : "")).filter(Boolean))
+  const names = Array.isArray(options?.restricted_agents)
+    ? options.restricted_agents
+    : DEFAULT_RESTRICTED_AGENTS
+  return new Set(
+    names
+      .map((name) => (typeof name === "string" ? name.trim().toLowerCase() : ""))
+      .filter(Boolean),
+  )
 }
 
 function goalCommandTemplate(commandName: string, locale: GoalLocale = "en") {
@@ -258,7 +277,10 @@ Use the goal tools to handle this command:
 Create a goal only from these explicit command arguments. Do not infer a goal from unrelated session context. After create_goal succeeds or returns an existing matching goal, never call it again for this command; continue working from the returned goal state.`
 }
 
-function goalStatusCommandTemplate(commandName: "pause_goal" | "resume_goal", locale: GoalLocale = "en") {
+function goalStatusCommandTemplate(
+  commandName: "pause_goal" | "resume_goal",
+  locale: GoalLocale = "en",
+) {
   if (locale === "zh-CN") {
     if (commandName === "pause_goal") {
       return `OpenCode 目标模式命令 "/pause_goal" 已调用。
@@ -313,7 +335,12 @@ Ignore any command arguments. Call get_goal first, then handle only this resume 
 Do not create, edit, clear, complete, or mark a goal unmet.`
 }
 
-function isExplicitResumePrompt(text: string, commandName: string, locale: GoalLocale, messages: GoalMessages) {
+function isExplicitResumePrompt(
+  text: string,
+  commandName: string,
+  locale: GoalLocale,
+  messages: GoalMessages,
+) {
   const value = text.trim()
   return (
     value === goalStatusCommandTemplate("resume_goal", locale) ||
@@ -329,7 +356,10 @@ type GoalCommandDefinition = {
   action: "goal" | "pause" | "resume"
 }
 
-function goalCommandDefinitions(commandName: string, locale: GoalLocale = "en"): GoalCommandDefinition[] {
+function goalCommandDefinitions(
+  commandName: string,
+  locale: GoalLocale = "en",
+): GoalCommandDefinition[] {
   const messages = messagesFor(locale)
   return [
     {
@@ -354,7 +384,9 @@ function goalCommandDefinitions(commandName: string, locale: GoalLocale = "en"):
 }
 
 function omitUndefined<T extends object>(value: T): Partial<T> {
-  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  ) as Partial<T>
 }
 
 function escapeXmlText(input: string) {
@@ -364,7 +396,8 @@ function escapeXmlText(input: string) {
 function commandNameFromOptions(options?: Options) {
   const name = options?.command_name?.trim() || DEFAULT_COMMAND_NAME
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return DEFAULT_COMMAND_NAME
-  if (name.toLowerCase() === "pause_goal" || name.toLowerCase() === "resume_goal") return DEFAULT_COMMAND_NAME
+  if (name.toLowerCase() === "pause_goal" || name.toLowerCase() === "resume_goal")
+    return DEFAULT_COMMAND_NAME
   return name
 }
 
@@ -393,7 +426,10 @@ function registerDesktopCommands(config: Config, commandName: string, locale: Go
   }
 }
 
-function sanitizeGoalStatusCommandParts(output: { parts: Array<{ type: string; text?: string }> }, template: string) {
+function sanitizeGoalStatusCommandParts(
+  output: { parts: Array<{ type: string; text?: string }> },
+  template: string,
+) {
   const text = output.parts.find((part) => part.type === "text" && part.text?.startsWith(template))
   if (!text) return false
   text.text = template
@@ -434,22 +470,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function sessionIDFromMessage(message: { info?: unknown; sessionID?: unknown }) {
   if (typeof message.sessionID === "string") return message.sessionID
-  if (isRecord(message.info) && typeof message.info.sessionID === "string") return message.info.sessionID
+  if (isRecord(message.info) && typeof message.info.sessionID === "string")
+    return message.info.sessionID
   return undefined
 }
 
 function estimateMessages(messages: { parts?: unknown[] }[]) {
-  return messages.reduce<number>((sum, message) => sum + estimateTokensFromText(textFromMessage(message)), 0)
+  return messages.reduce<number>(
+    (sum, message) => sum + estimateTokensFromText(textFromMessage(message)),
+    0,
+  )
 }
 
 function tokensFromRecord(value: unknown): number | undefined {
   if (!value || typeof value !== "object") return undefined
   const tokens = value as Record<string, unknown>
   if (typeof tokens.total === "number") return tokens.total
-  const cache = tokens.cache && typeof tokens.cache === "object" ? (tokens.cache as Record<string, unknown>) : {}
+  const cache =
+    tokens.cache && typeof tokens.cache === "object"
+      ? (tokens.cache as Record<string, unknown>)
+      : {}
   const fields = [tokens.input, tokens.output, tokens.reasoning, cache.read, cache.write]
   if (!fields.some((field) => typeof field === "number")) return undefined
-  return fields.reduce<number>((sum, field) => sum + (typeof field === "number" && Number.isFinite(field) ? field : 0), 0)
+  return fields.reduce<number>(
+    (sum, field) => sum + (typeof field === "number" && Number.isFinite(field) ? field : 0),
+    0,
+  )
 }
 
 function outputTokensFromRecord(value: unknown): number | undefined {
@@ -466,27 +512,39 @@ function exactTokensFromPart(part: unknown): number | undefined {
 }
 
 function exactTokensFromMessage(message: { info?: unknown; parts?: unknown[] }) {
-  const partTotal = (message.parts ?? []).reduce<number>((sum, part) => sum + (exactTokensFromPart(part) ?? 0), 0)
+  const partTotal = (message.parts ?? []).reduce<number>(
+    (sum, part) => sum + (exactTokensFromPart(part) ?? 0),
+    0,
+  )
   if (partTotal > 0) return partTotal
-  if (message.info && typeof message.info === "object") return tokensFromRecord((message.info as Record<string, unknown>).tokens)
+  if (message.info && typeof message.info === "object")
+    return tokensFromRecord((message.info as Record<string, unknown>).tokens)
   return undefined
 }
 
 function outputTokensFromMessage(message: { info?: unknown; parts?: unknown[] }) {
   let total: number | undefined
   for (const part of message.parts ?? []) {
-    if (part && typeof part === "object" && (part as Record<string, unknown>).type === "step-finish") {
+    if (
+      part &&
+      typeof part === "object" &&
+      (part as Record<string, unknown>).type === "step-finish"
+    ) {
       const output = outputTokensFromRecord((part as Record<string, unknown>).tokens)
       if (output != null) total = (total ?? 0) + output
     }
   }
   if (total != null) return total
-  if (message.info && typeof message.info === "object") return outputTokensFromRecord((message.info as Record<string, unknown>).tokens)
+  if (message.info && typeof message.info === "object")
+    return outputTokensFromRecord((message.info as Record<string, unknown>).tokens)
   return undefined
 }
 
 function usageFromMessages(messages: { info?: unknown; parts?: unknown[] }[]) {
-  const exactTotal = messages.reduce<number>((sum, message) => sum + (exactTokensFromMessage(message) ?? 0), 0)
+  const exactTotal = messages.reduce<number>(
+    (sum, message) => sum + (exactTokensFromMessage(message) ?? 0),
+    0,
+  )
   return exactTotal > 0
     ? { tokens: exactTotal, source: "v1.messages.exact" }
     : { tokens: estimateMessages(messages), source: "v1.messages.estimated" }
@@ -508,7 +566,9 @@ function parseTaskID(output: string) {
 }
 
 function parseTaskState(output: string): TaskState | undefined {
-  const xmlMatch = /<task\s+[^>]*\bstate=["'](running|completed|error|cancelled)["'][^>]*>/i.exec(output)
+  const xmlMatch = /<task\s+[^>]*\bstate=["'](running|completed|error|cancelled)["'][^>]*>/i.exec(
+    output,
+  )
   if (xmlMatch?.[1]) return xmlMatch[1].toLowerCase() as TaskState
   for (const line of taskHeader(output).split(/\r?\n/)) {
     const match = /^state:\s*(running|completed|error|cancelled)\s*$/i.exec(line.trim())
@@ -525,13 +585,21 @@ function parseTaskStatus(output: unknown): TaskStatus | undefined {
 }
 
 function messageCompletedAt(message: { info?: unknown; time?: unknown }) {
-  const time =
-    isRecord(message.time) ? message.time : isRecord(message.info) && isRecord(message.info.time) ? message.info.time : undefined
+  const time = isRecord(message.time)
+    ? message.time
+    : isRecord(message.info) && isRecord(message.info.time)
+      ? message.info.time
+      : undefined
   const completed = time?.completed
   return typeof completed === "number" && Number.isFinite(completed) ? completed : null
 }
 
-function assistantMarker(message: { info?: unknown; role?: unknown; id?: unknown; time?: unknown }): AssistantMarker | undefined {
+function assistantMarker(message: {
+  info?: unknown
+  role?: unknown
+  id?: unknown
+  time?: unknown
+}): AssistantMarker | undefined {
   if (messageRole(message) !== "assistant") return undefined
   return {
     id: messageID(message) ?? null,
@@ -551,7 +619,12 @@ function agentFromMessage(message: { info?: unknown } | undefined) {
   return undefined
 }
 
-async function sendContinuation(client: Parameters<Plugin>[0]["client"], sessionID: string, prompt: string, agent?: string | null) {
+async function sendContinuation(
+  client: Parameters<Plugin>[0]["client"],
+  sessionID: string,
+  prompt: string,
+  agent?: string | null,
+) {
   await client.session.promptAsync({
     path: { id: sessionID },
     body: {
@@ -564,7 +637,12 @@ async function sendContinuation(client: Parameters<Plugin>[0]["client"], session
 function isIdleEvent(event: { type?: string; properties?: Record<string, unknown> }) {
   if (event.type === "session.idle") return true
   const status = event.properties?.status
-  return event.type === "session.status" && typeof status === "object" && status !== null && (status as { type?: unknown }).type === "idle"
+  return (
+    event.type === "session.status" &&
+    typeof status === "object" &&
+    status !== null &&
+    (status as { type?: unknown }).type === "idle"
+  )
 }
 
 function isTransportError(error: unknown) {
@@ -593,7 +671,11 @@ function continuationRetryDelayMs(minIntervalSeconds: number, attemptAt: number,
   return Math.max(0, attemptAt + minIntervalSeconds * 1000 - now) + RETRY_SETTLE_MS
 }
 
-function continuationDelayFromSnapshot(minIntervalSeconds: number, lastContinuationAt: number | null, now = Date.now()) {
+function continuationDelayFromSnapshot(
+  minIntervalSeconds: number,
+  lastContinuationAt: number | null,
+  now = Date.now(),
+) {
   if (lastContinuationAt == null) return RETRY_SETTLE_MS
   // lastContinuationAt is floor(seconds), so include the remainder of that
   // second to guarantee reserveContinuation cannot wake too early and wedge.
@@ -609,7 +691,11 @@ function pendingAttemptOf(goal: InternalGoalSnapshot | null): PendingAttempt | n
 // went stale after a plugin restart. A locally delivered-but-unstarted attempt
 // is left alone: a paired duplicate idle before any busy must never count a
 // failure or send a duplicate.
-function pendingReadyForFailure(attempt: PendingAttempt | null, deliveredLocally: boolean, now = Date.now()) {
+function pendingReadyForFailure(
+  attempt: PendingAttempt | null,
+  deliveredLocally: boolean,
+  now = Date.now(),
+) {
   if (!attempt) return false
   if (attempt.started) return true
   if (deliveredLocally) return false
@@ -658,15 +744,22 @@ function toolOutputFailed(output: unknown) {
   if (typeof state === "string") {
     const normalized = state.trim().toLowerCase()
     if (TOOL_FAILURE_STATES.has(normalized)) return true
-    if (["completed", "complete", "success", "succeeded", "ok", "done"].includes(normalized)) return false
+    if (["completed", "complete", "success", "succeeded", "ok", "done"].includes(normalized))
+      return false
   }
   if (isRecord(output.metadata)) {
     const metaState = output.metadata.state ?? output.metadata.status
-    if (typeof metaState === "string" && TOOL_FAILURE_STATES.has(metaState.trim().toLowerCase())) return true
+    if (typeof metaState === "string" && TOOL_FAILURE_STATES.has(metaState.trim().toLowerCase()))
+      return true
   }
   const taskState = parseTaskState(text)
   if (taskState) return taskState !== "completed"
-  if (/^state:\s*(failed|failure|error|cancelled|canceled|aborted|abort|interrupted|running|pending|incomplete|partial|timeout|timed_out)\b/im.test(text)) return true
+  if (
+    /^state:\s*(failed|failure|error|cancelled|canceled|aborted|abort|interrupted|running|pending|incomplete|partial|timeout|timed_out)\b/im.test(
+      text,
+    )
+  )
+    return true
   if (/^<error>/i.test(text) || /^<tool-error>/i.test(text) || /^error:/i.test(text)) return true
   return false
 }
@@ -685,7 +778,8 @@ function sessionIDFromEvent(event: { type?: string; properties?: Record<string, 
   if (typeof direct === "string") return direct
   const info = event.properties?.info
   if (typeof info === "object" && info !== null) {
-    if (typeof (info as { sessionID?: unknown }).sessionID === "string") return (info as { sessionID: string }).sessionID
+    if (typeof (info as { sessionID?: unknown }).sessionID === "string")
+      return (info as { sessionID: string }).sessionID
     if (event.type === "session.deleted" && typeof (info as { id?: unknown }).id === "string") {
       return (info as { id: string }).id
     }
@@ -695,7 +789,11 @@ function sessionIDFromEvent(event: { type?: string; properties?: Record<string, 
 
 function messageID(message: { info?: unknown; id?: unknown }) {
   if (typeof message.id === "string") return message.id
-  if (message.info && typeof message.info === "object" && typeof (message.info as { id?: unknown }).id === "string") {
+  if (
+    message.info &&
+    typeof message.info === "object" &&
+    typeof (message.info as { id?: unknown }).id === "string"
+  ) {
     return (message.info as { id: string }).id
   }
   return undefined
@@ -703,24 +801,35 @@ function messageID(message: { info?: unknown; id?: unknown }) {
 
 function messageRole(message: { info?: unknown; role?: unknown }) {
   if (typeof message.role === "string") return message.role
-  if (message.info && typeof message.info === "object" && typeof (message.info as { role?: unknown }).role === "string") {
+  if (
+    message.info &&
+    typeof message.info === "object" &&
+    typeof (message.info as { role?: unknown }).role === "string"
+  ) {
     return (message.info as { role: string }).role
   }
   return undefined
 }
 
-function latestAssistantMessage(messages: { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] }[]) {
+function latestAssistantMessage(
+  messages: { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] }[],
+) {
   return [...messages].reverse().find((message) => messageRole(message) === "assistant")
 }
 
 async function fetchLatestAssistant(client: Parameters<Plugin>[0]["client"], sessionID: string) {
   const session = client.session as unknown as {
-    messages?: (input: { path: { id: string }; query: { limit: number } }) => Promise<{ data?: unknown[] }>
+    messages?: (input: {
+      path: { id: string }
+      query: { limit: number }
+    }) => Promise<{ data?: unknown[] }>
   }
   if (!session.messages) return undefined
   const result = await session.messages({ path: { id: sessionID }, query: { limit: 20 } })
   const data = Array.isArray(result.data) ? result.data : []
-  return latestAssistantMessage(data as { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] }[])
+  return latestAssistantMessage(
+    data as { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[] }[],
+  )
 }
 
 class TaskTracker {
@@ -731,15 +840,22 @@ class TaskTracker {
   private readonly settledSnapshotIdleTasks = new Set<string>()
 
   noteTaskCall(input: { tool?: unknown; sessionID?: unknown; callID?: unknown }) {
-    if (typeof input.tool !== "string" || !["task", "subagent"].includes(input.tool.toLowerCase())) return
+    if (typeof input.tool !== "string" || !["task", "subagent"].includes(input.tool.toLowerCase()))
+      return
     if (typeof input.sessionID !== "string") return
     if (typeof input.callID === "string") this.pendingTaskCalls.set(input.callID, input.sessionID)
   }
 
-  noteTaskOutput(input: { tool?: unknown; sessionID?: unknown; callID?: unknown }, output: { output?: unknown }) {
-    if (typeof input.tool !== "string" || !["task", "subagent"].includes(input.tool.toLowerCase())) return
+  noteTaskOutput(
+    input: { tool?: unknown; sessionID?: unknown; callID?: unknown },
+    output: { output?: unknown },
+  ) {
+    if (typeof input.tool !== "string" || !["task", "subagent"].includes(input.tool.toLowerCase()))
+      return
     const parentSessionID =
-      typeof input.callID === "string" ? this.pendingTaskCalls.get(input.callID) ?? input.sessionID : input.sessionID
+      typeof input.callID === "string"
+        ? (this.pendingTaskCalls.get(input.callID) ?? input.sessionID)
+        : input.sessionID
     if (typeof input.callID === "string") this.pendingTaskCalls.delete(input.callID)
     if (typeof parentSessionID !== "string") return
     const status = parseTaskStatus(output.output)
@@ -776,7 +892,9 @@ class TaskTracker {
     this.clearSnapshotIdleForSession(sessionID)
   }
 
-  observeMessages(messages: { info?: unknown; role?: unknown; id?: unknown; time?: unknown; parts?: unknown[] }[]) {
+  observeMessages(
+    messages: { info?: unknown; role?: unknown; id?: unknown; time?: unknown; parts?: unknown[] }[],
+  ) {
     for (const message of messages) {
       const sessionID = sessionIDFromMessage(message)
       if (!sessionID) continue
@@ -822,12 +940,17 @@ class TaskTracker {
       }
       const terminalAt = messageCompletedAt({ time: message.time }) ?? undefined
       for (const entry of message.content) {
-        if (entry.type !== "tool" || !["task", "subagent"].includes(entry.name.toLowerCase())) continue
+        if (entry.type !== "tool" || !["task", "subagent"].includes(entry.name.toLowerCase()))
+          continue
         if (entry.state.status === "streaming" || entry.state.status === "running") continue
         const status = parseTaskStatus(toolTextFromV2Content(entry.state.content ?? []))
         if (!status) continue
         if (status.state === "running") this.markRunning(parentSessionID, status.taskID)
-        else this.markTerminal(status.taskID, status.state, parentSessionID, { resetReconciled: true, terminalAt })
+        else
+          this.markTerminal(status.taskID, status.state, parentSessionID, {
+            resetReconciled: true,
+            terminalAt,
+          })
       }
     }
   }
@@ -867,7 +990,9 @@ class TaskTracker {
     try {
       const result = await session.children({ path: { id: parentSessionID } })
       const data = Array.isArray(result) ? result : Array.isArray(result.data) ? result.data : []
-      childIDs = data.flatMap((child) => (isRecord(child) && typeof child.id === "string" ? [child.id] : []))
+      childIDs = data.flatMap((child) =>
+        isRecord(child) && typeof child.id === "string" ? [child.id] : [],
+      )
     } catch {
       return
     }
@@ -876,13 +1001,15 @@ class TaskTracker {
     let statuses: Record<string, unknown>
     try {
       const result = await session.status()
-      statuses = isRecord(result) && isRecord(result.data) ? result.data : isRecord(result) ? result : {}
+      statuses =
+        isRecord(result) && isRecord(result.data) ? result.data : isRecord(result) ? result : {}
     } catch {
       return
     }
     for (const childID of childIDs) {
       const status = statuses[childID]
-      const statusType = isRecord(status) && typeof status.type === "string" ? status.type : undefined
+      const statusType =
+        isRecord(status) && typeof status.type === "string" ? status.type : undefined
       if (statusType === "busy") this.markRunning(parentSessionID, childID)
       else if (statusType === "idle") {
         if (this.tasks.has(childID)) this.markTerminal(childID, "completed", parentSessionID)
@@ -899,7 +1026,8 @@ class TaskTracker {
       parentSessionID,
       state: "running",
       terminalUnreconciled: false,
-      runningSince: existing?.state === "running" ? existing.runningSince ?? Date.now() : Date.now(),
+      runningSince:
+        existing?.state === "running" ? (existing.runningSince ?? Date.now()) : Date.now(),
       terminalAt: null,
       lastAssistantMessageIDAtTerminal: existing?.lastAssistantMessageIDAtTerminal ?? null,
     })
@@ -943,10 +1071,12 @@ class TaskTracker {
       state,
       terminalUnreconciled: true,
       runningSince: null,
-      terminalAt: options.terminalAt ?? (continuesExistingTerminal ? existing.terminalAt ?? Date.now() : Date.now()),
+      terminalAt:
+        options.terminalAt ??
+        (continuesExistingTerminal ? (existing.terminalAt ?? Date.now()) : Date.now()),
       lastAssistantMessageIDAtTerminal: continuesExistingTerminal
         ? existing.lastAssistantMessageIDAtTerminal
-        : this.latestAssistantBySession.get(resolvedParentSessionID)?.id ?? null,
+        : (this.latestAssistantBySession.get(resolvedParentSessionID)?.id ?? null),
     })
   }
 
@@ -968,7 +1098,8 @@ class TaskTracker {
 
   private clearSnapshotIdleForSession(sessionID: string) {
     for (const [key, hold] of this.snapshotIdleHolds) {
-      if (hold.taskID === sessionID || hold.parentSessionID === sessionID) this.snapshotIdleHolds.delete(key)
+      if (hold.taskID === sessionID || hold.parentSessionID === sessionID)
+        this.snapshotIdleHolds.delete(key)
     }
     for (const key of this.settledSnapshotIdleTasks) {
       if (key.startsWith(`${sessionID}\0`) || key.endsWith(`\0${sessionID}`)) {
@@ -983,13 +1114,19 @@ class TaskTracker {
       this.snapshotIdleHolds.delete(key)
       this.settledSnapshotIdleTasks.add(key)
       const task = this.tasks.get(hold.taskID)
-      if (task?.parentSessionID === hold.parentSessionID && task.state === "running") this.tasks.delete(hold.taskID)
+      if (task?.parentSessionID === hold.parentSessionID && task.state === "running")
+        this.tasks.delete(hold.taskID)
     }
   }
 
   private markAbsentRunningChildren(parentSessionID: string, liveChildIDs: Set<string>) {
     for (const task of this.tasks.values()) {
-      if (task.parentSessionID !== parentSessionID || task.state !== "running" || liveChildIDs.has(task.taskID)) continue
+      if (
+        task.parentSessionID !== parentSessionID ||
+        task.state !== "running" ||
+        liveChildIDs.has(task.taskID)
+      )
+        continue
       this.markSnapshotIdle(parentSessionID, task.taskID)
     }
   }
@@ -1009,15 +1146,27 @@ class TaskTracker {
   }
 
   private assistantReconcilesTask(task: TaskRecord, marker: AssistantMarker) {
-    if (marker.id && task.lastAssistantMessageIDAtTerminal && marker.id !== task.lastAssistantMessageIDAtTerminal) return true
-    if (marker.completedAt != null && task.terminalAt != null && marker.completedAt >= task.terminalAt) return true
+    if (
+      marker.id &&
+      task.lastAssistantMessageIDAtTerminal &&
+      marker.id !== task.lastAssistantMessageIDAtTerminal
+    )
+      return true
+    if (
+      marker.completedAt != null &&
+      task.terminalAt != null &&
+      marker.completedAt >= task.terminalAt
+    )
+      return true
     return false
   }
 }
 
 async function recordAssistantMessage(
   sessionID: string,
-  message: { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[]; time?: unknown } | undefined,
+  message:
+    | { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[]; time?: unknown }
+    | undefined,
   options: Options,
   evaluateContinuation = false,
 ) {
@@ -1026,7 +1175,8 @@ async function recordAssistantMessage(
   const id = messageID(message) ?? ""
   const text = textFromMessage(message)
   const progressed = Boolean(
-    /[\p{L}\p{N}]/u.test(text) && (id !== (before?.lastAssistantMessageID ?? "") || text !== (before?.lastAssistantText ?? "")),
+    /[\p{L}\p{N}]/u.test(text) &&
+      (id !== (before?.lastAssistantMessageID ?? "") || text !== (before?.lastAssistantText ?? "")),
   )
   const goal = await recordAssistantProgress(sessionID, {
     messageID: id,
@@ -1083,7 +1233,10 @@ function acpPlanMetadata(goal: GoalSnapshot | null) {
         entries: goal?.plan
           ? goalPlanEntries(goal.plan).map((entry) => ({
               ...entry,
-              status: goal.status !== "active" && entry.status === "in_progress" ? "pending" : entry.status,
+              status:
+                goal.status !== "active" && entry.status === "in_progress"
+                  ? "pending"
+                  : entry.status,
             }))
           : [],
         _meta: {
@@ -1139,10 +1292,17 @@ type GoalServices = {
   consumeAutoTurnReset: (sessionID: string) => boolean
   initializeUsage?: (sessionID: string) => Promise<void>
   stopAutonomy?: (sessionID: string, mode?: "stop" | "replace") => void
-  consumeObjectiveEdit?: (sessionID: string, objective: string) => { goalID: string; objective: string } | undefined
+  consumeObjectiveEdit?: (
+    sessionID: string,
+    objective: string,
+  ) => { goalID: string; objective: string } | undefined
 }
 
-function boundedGoalTextSchema(limit: number, description: string, validate: (value: string) => string) {
+function boundedGoalTextSchema(
+  limit: number,
+  description: string,
+  validate: (value: string) => string,
+) {
   return z
     .string()
     .superRefine((value, ctx) => {
@@ -1162,18 +1322,24 @@ function v2GoalTextSchema(limit: number, description: string) {
   return { type: "string" as const, minLength: 1, maxLength: limit, pattern: "\\S", description }
 }
 
-async function createGoalFromTool(input: CreateGoalArgs, context: ToolExecContext, services: GoalServices) {
+async function createGoalFromTool(
+  input: CreateGoalArgs,
+  context: ToolExecContext,
+  services: GoalServices,
+) {
   const planningOnly = services.isPlanAgent(context.agent)
   const objective = validateObjective(input.objective, services.maxObjectiveChars)
   const existing = await getGoal(context.sessionID)
-  if (existing && !isClosedGoal(existing)) return existingGoalResult(existing, objective, planningOnly, services)
+  if (existing && !isClosedGoal(existing))
+    return existingGoalResult(existing, objective, planningOnly, services)
 
   let goal: GoalSnapshot
   try {
     goal = await createGoal(context.sessionID, input.objective, {
       tokenBudget: input.token_budget ?? services.options.default_token_budget ?? null,
       maxAutoTurns: input.max_auto_turns ?? null,
-      maxDurationSeconds: input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
+      maxDurationSeconds:
+        input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
       noProgressTokenThreshold: services.options.no_progress_token_threshold ?? null,
       maxNoProgressTurns: services.options.max_no_progress_turns ?? null,
       agent: typeof context.agent === "string" ? context.agent : null,
@@ -1183,12 +1349,17 @@ async function createGoalFromTool(input: CreateGoalArgs, context: ToolExecContex
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("non-closed goal")) throw error
     const raced = await getGoal(context.sessionID)
-    if (raced && !isClosedGoal(raced)) return existingGoalResult(raced, objective, planningOnly, services)
+    if (raced && !isClosedGoal(raced))
+      return existingGoalResult(raced, objective, planningOnly, services)
     throw error
   }
   await services.initializeUsage?.(context.sessionID)
   if (goal.status === "active") services.stopAutonomy?.(context.sessionID, "replace")
-  return JSON.stringify(planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal }, null, 2)
+  return JSON.stringify(
+    planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal },
+    null,
+    2,
+  )
 }
 
 function isClosedGoal(goal: Pick<GoalSnapshot, "status">) {
@@ -1207,12 +1378,17 @@ async function clearGoalFromTool(context: ToolExecContext, services: GoalService
   return JSON.stringify({ goal: null, cleared }, null, 2)
 }
 
-async function replaceGoalFromTool(input: CreateGoalArgs, context: ToolExecContext, services: GoalServices) {
+async function replaceGoalFromTool(
+  input: CreateGoalArgs,
+  context: ToolExecContext,
+  services: GoalServices,
+) {
   const planningOnly = services.isPlanAgent(context.agent)
   const result = await replaceGoal(context.sessionID, input.objective, {
     tokenBudget: input.token_budget ?? services.options.default_token_budget ?? null,
     maxAutoTurns: input.max_auto_turns ?? null,
-    maxDurationSeconds: input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
+    maxDurationSeconds:
+      input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
     noProgressTokenThreshold: services.options.no_progress_token_threshold ?? null,
     maxNoProgressTurns: services.options.max_no_progress_turns ?? null,
     agent: typeof context.agent === "string" ? context.agent : null,
@@ -1222,7 +1398,9 @@ async function replaceGoalFromTool(input: CreateGoalArgs, context: ToolExecConte
   services.stopAutonomy?.(context.sessionID, "replace")
   await services.initializeUsage?.(context.sessionID)
   return JSON.stringify(
-    planningOnly ? { ...result, plan_mode_notice: services.messages.notices.planModeCreate } : result,
+    planningOnly
+      ? { ...result, plan_mode_notice: services.messages.notices.planModeCreate }
+      : result,
     null,
     2,
   )
@@ -1250,7 +1428,8 @@ function formatSessionGoalHistory(
 // non-active status (paused, complete, unmet) fails canContinue outright.
 function taskDeferralGoalContinuable(goal: GoalSnapshot | null | undefined) {
   if (!goal) return false
-  if (goal.status === "budgetLimited" || goal.status === "usageLimited") return !goal.budgetWrapupSent
+  if (goal.status === "budgetLimited" || goal.status === "usageLimited")
+    return !goal.budgetWrapupSent
   return goal.status === "active"
 }
 
@@ -1287,18 +1466,35 @@ async function updateGoalObjectiveFromTool(
   const requested = input.status ?? "active"
   const planningOnly = requested === "active" && services.isPlanAgent(context.agent)
   const edit = services.consumeObjectiveEdit?.(context.sessionID, input.objective)
-  const goal = await updateGoalObjective(context.sessionID, edit?.objective ?? input.objective, planningOnly ? "paused" : requested, {
-    agent: typeof context.agent === "string" ? context.agent : null,
-    planModePause: planningOnly,
-    maxObjectiveChars: services.maxObjectiveChars,
-    requestedPlanEdit: edit,
-  })
-  return JSON.stringify(planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal }, null, 2)
+  const goal = await updateGoalObjective(
+    context.sessionID,
+    edit?.objective ?? input.objective,
+    planningOnly ? "paused" : requested,
+    {
+      agent: typeof context.agent === "string" ? context.agent : null,
+      planModePause: planningOnly,
+      maxObjectiveChars: services.maxObjectiveChars,
+      requestedPlanEdit: edit,
+    },
+  )
+  return JSON.stringify(
+    planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal },
+    null,
+    2,
+  )
 }
 
-async function closeGoalFromTool(input: UpdateGoalArgs, context: ToolExecContext, services: GoalServices) {
+async function closeGoalFromTool(
+  input: UpdateGoalArgs,
+  context: ToolExecContext,
+  services: GoalServices,
+) {
   if (input.status === "complete") {
-    const goal = await completeGoal(context.sessionID, input.evidence ?? "", services.maxObjectiveChars)
+    const goal = await completeGoal(
+      context.sessionID,
+      input.evidence ?? "",
+      services.maxObjectiveChars,
+    )
     const budget =
       goal.tokenBudget == null
         ? ""
@@ -1309,7 +1505,11 @@ async function closeGoalFromTool(input: UpdateGoalArgs, context: ToolExecContext
       `${services.messages.reports.evidence}: ${goal.completionEvidence}.`
     return JSON.stringify({ goal, completion_report: report }, null, 2)
   }
-  const goal = await markGoalUnmet(context.sessionID, input.blocker ?? "", services.maxObjectiveChars)
+  const goal = await markGoalUnmet(
+    context.sessionID,
+    input.blocker ?? "",
+    services.maxObjectiveChars,
+  )
   const report =
     `${services.messages.reports.unmet} ${services.messages.reports.timeUsed}: ` +
     `${goal.timeUsedSeconds} ${services.messages.reports.seconds}. ` +
@@ -1322,11 +1522,10 @@ async function updateGoalStatusFromTool(
   context: ToolExecContext,
   services: GoalServices,
 ) {
-  const resetAutoTurnLimit = input.status === "active" && services.consumeAutoTurnReset(context.sessionID)
+  const resetAutoTurnLimit =
+    input.status === "active" && services.consumeAutoTurnReset(context.sessionID)
   if (input.status === "active" && services.isPlanAgent(context.agent)) {
-    throw new Error(
-      services.messages.notices.cannotResumeInPlan,
-    )
+    throw new Error(services.messages.notices.cannotResumeInPlan)
   }
   const goal = await setGoalStatus(
     context.sessionID,
@@ -1338,11 +1537,17 @@ async function updateGoalStatusFromTool(
 }
 
 function planToolInputSchema(): ToolSchema.ValueSchema {
-  const { $schema: _schema, ...schema } = z.toJSONSchema(PlanToolSchema, { io: "input", unrepresentable: "any" })
+  const { $schema: _schema, ...schema } = z.toJSONSchema(PlanToolSchema, {
+    io: "input",
+    unrepresentable: "any",
+  })
   return schema as ToolSchema.ValueSchema
 }
 
-function v2ObjectSchema(properties: Record<string, unknown>, required: string[] = []): ToolSchema.ValueSchema {
+function v2ObjectSchema(
+  properties: Record<string, unknown>,
+  required: string[] = [],
+): ToolSchema.ValueSchema {
   return {
     type: "object",
     properties,
@@ -1367,7 +1572,8 @@ function decodeV2Event(value: unknown): V2EventLike | undefined {
       return undefined
     }
   }
-  if (!isRecord(decoded) || typeof decoded.type !== "string" || !isRecord(decoded.data)) return undefined
+  if (!isRecord(decoded) || typeof decoded.type !== "string" || !isRecord(decoded.data))
+    return undefined
   if (typeof decoded.created !== "number") return undefined
   return decoded as V2EventLike
 }
@@ -1397,7 +1603,9 @@ function textFromToolResult(result: { output?: unknown; content?: unknown }): st
 
 function toolTextFromV2Content(content: readonly unknown[]) {
   return content
-    .map((entry) => (isRecord(entry) && entry.type === "text" && typeof entry.text === "string" ? entry.text : ""))
+    .map((entry) =>
+      isRecord(entry) && entry.type === "text" && typeof entry.text === "string" ? entry.text : "",
+    )
     .filter(Boolean)
     .join("\n")
     .trim()
@@ -1420,12 +1628,15 @@ const server: Plugin = async ({ client }, options?: Options) => {
   const autoContinue = options?.auto_continue ?? true
   const deferWhileTasksActive = options?.defer_while_tasks_active ?? true
   const maxAutoTurns = positiveIntegerOrNull(options?.max_auto_turns) ?? DEFAULT_MAX_AUTO_TURNS
-  const minInterval = nonNegativeIntegerOrNull(options?.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS
+  const minInterval =
+    nonNegativeIntegerOrNull(options?.min_continue_interval_seconds) ??
+    DEFAULT_CONTINUE_INTERVAL_SECONDS
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options?.max_turn_time)
   const maxTaskBlockMs = timeoutMillisecondsFromSeconds(
     options?.max_task_block_seconds ?? DEFAULT_MAX_TASK_BLOCK_SECONDS,
   )
-  const maxPromptFailures = positiveIntegerOrNull(options?.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
+  const maxPromptFailures =
+    positiveIntegerOrNull(options?.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
   const registerCommand = options?.register_command ?? true
   const commandName = commandNameFromOptions(options)
   const locale = resolveLocale(options?.locale)
@@ -1452,7 +1663,8 @@ const server: Plugin = async ({ client }, options?: Options) => {
   // once and a rescue prompt cannot recursively re-arm the watchdog.
   const watchdogRescuedSessions = new Set<string>()
   const planAgents = restrictedAgentSet(options)
-  const isPlanAgent = (agent: unknown) => typeof agent === "string" && planAgents.has(agent.trim().toLowerCase())
+  const isPlanAgent = (agent: unknown) =>
+    typeof agent === "string" && planAgents.has(agent.trim().toLowerCase())
   const goalServices: GoalServices = {
     options: options ?? {},
     locale,
@@ -1462,7 +1674,11 @@ const server: Plugin = async ({ client }, options?: Options) => {
     consumeAutoTurnReset: (sessionID) => explicitResumeRequests.delete(sessionID),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID)
-      if (!edit || (edit.objective !== objective.trim() && escapeXmlText(edit.objective) !== objective.trim())) return
+      if (
+        !edit ||
+        (edit.objective !== objective.trim() && escapeXmlText(edit.objective) !== objective.trim())
+      )
+        return
       objectiveEdits.delete(sessionID)
       return edit
     },
@@ -1472,25 +1688,29 @@ const server: Plugin = async ({ client }, options?: Options) => {
       if (mode === "stop") clearTurnWatchdog(sessionID)
       taskDeferredSessions.delete(sessionID)
       locallyDeliveredPendingSessions.delete(sessionID)
-      if (mode === "replace" && activeContinuations.has(sessionID)) restartAfterContinuation.add(sessionID)
+      if (mode === "replace" && activeContinuations.has(sessionID))
+        restartAfterContinuation.add(sessionID)
       else restartAfterContinuation.delete(sessionID)
     },
   }
-  const stopStateRecoveryReporting = onStateRecovery(statePath(), async ({ stateFile, quarantineFile, outcome, error }) => {
-    await client.app?.log?.({
-      body: {
-        service: "opencode-goal-plugin",
-        level: "error",
-        message:
-          outcome === "quarantined"
-            ? "Corrupt goal state quarantined before recovery"
-            : outcome === "sourceChanged"
-              ? "Goal state changed during recovery; refusing to overwrite it"
-              : "Corrupt goal state could not be quarantined; continuing recovery",
-        extra: { stateFile, quarantineFile, outcome, ...(error ? { error } : {}) },
-      },
-    })
-  })
+  const stopStateRecoveryReporting = onStateRecovery(
+    statePath(),
+    async ({ stateFile, quarantineFile, outcome, error }) => {
+      await client.app?.log?.({
+        body: {
+          service: "opencode-goal-plugin",
+          level: "error",
+          message:
+            outcome === "quarantined"
+              ? "Corrupt goal state quarantined before recovery"
+              : outcome === "sourceChanged"
+                ? "Goal state changed during recovery; refusing to overwrite it"
+                : "Corrupt goal state could not be quarantined; continuing recovery",
+          extra: { stateFile, quarantineFile, outcome, ...(error ? { error } : {}) },
+        },
+      })
+    },
+  )
   // Set by dispose so in-flight operations triggered before disposal cannot
   // schedule new timers or invoke continuations afterward.
   let disposed = false
@@ -1545,14 +1765,27 @@ const server: Plugin = async ({ client }, options?: Options) => {
       if (isPlanAgent(latestTurnAgent)) return
       // Establish the pre-rescue baseline so this same historical message
       // cannot later be mistaken for progress from the rescue prompt.
-      const observedBeforeRescue = await recordAssistantMessage(sessionID, latestAssistant, options ?? {})
-      await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, observedBeforeRescue.goal)
+      const observedBeforeRescue = await recordAssistantMessage(
+        sessionID,
+        latestAssistant,
+        options ?? {},
+      )
+      await reconcileLocalMarkerAfterProgress(
+        locallyDeliveredPendingSessions,
+        sessionID,
+        observedBeforeRescue.goal,
+      )
       const taskStatus = await taskBlockStatus(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
       if (taskStatus && taskStatus.blocked) return
       const current = await getGoal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
-      if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuations.has(sessionID)) return
+      if (
+        current?.status !== "active" ||
+        isPlanAgent(current.lastPromptAgent) ||
+        activeContinuations.has(sessionID)
+      )
+        return
 
       turnWatchdogs.delete(sessionID)
       activeContinuations.add(sessionID)
@@ -1587,7 +1820,9 @@ const server: Plugin = async ({ client }, options?: Options) => {
         // transport errors accumulate toward max_prompt_failures without
         // consuming auto-turn budgets.
         if (claimedContinuation && isCurrent() && isTransportError(error)) {
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID })
+          await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+            expectedGoalID: claimedGoalID,
+          })
         }
         await client.app?.log?.({
           body: {
@@ -1603,7 +1838,11 @@ const server: Plugin = async ({ client }, options?: Options) => {
     } finally {
       if (claimedContinuation) {
         activeContinuations.delete(sessionID)
-        if (restartAfterContinuation.delete(sessionID) && !disposed && !busySessions.has(sessionID)) {
+        if (
+          restartAfterContinuation.delete(sessionID) &&
+          !disposed &&
+          !busySessions.has(sessionID)
+        ) {
           scheduleSettledContinuation(sessionID)
         }
       }
@@ -1627,19 +1866,31 @@ const server: Plugin = async ({ client }, options?: Options) => {
     if (!replace && scheduledContinuations.has(sessionID)) return
     if (replace) cancelScheduledContinuation(sessionID)
     const scheduled = {} as ScheduledContinuation
-    const timer = setTimeout(async () => {
-      try {
-        if (scheduledContinuations.get(sessionID) !== scheduled || nativeRetrySessions.has(sessionID)) return
-        if (purpose === "retry") {
-          const goal = await getGoalInternal(sessionID)
-          if (!goal || (goal.continuationFailures === 0 && goal.pendingAttempt == null)) return
+    const timer = setTimeout(
+      async () => {
+        try {
+          if (
+            scheduledContinuations.get(sessionID) !== scheduled ||
+            nativeRetrySessions.has(sessionID)
+          )
+            return
+          if (purpose === "retry") {
+            const goal = await getGoalInternal(sessionID)
+            if (!goal || (goal.continuationFailures === 0 && goal.pendingAttempt == null)) return
+          }
+          if (
+            scheduledContinuations.get(sessionID) !== scheduled ||
+            nativeRetrySessions.has(sessionID)
+          )
+            return
+          await runAutoContinue(sessionID, true, scheduled)
+        } finally {
+          if (scheduledContinuations.get(sessionID) === scheduled)
+            scheduledContinuations.delete(sessionID)
         }
-        if (scheduledContinuations.get(sessionID) !== scheduled || nativeRetrySessions.has(sessionID)) return
-        await runAutoContinue(sessionID, true, scheduled)
-      } finally {
-        if (scheduledContinuations.get(sessionID) === scheduled) scheduledContinuations.delete(sessionID)
-      }
-    }, Math.max(0, delayMs))
+      },
+      Math.max(0, delayMs),
+    )
     scheduled.timer = timer
     scheduled.purpose = purpose
     const maybeUnref = timer as { unref?: () => void }
@@ -1697,9 +1948,14 @@ const server: Plugin = async ({ client }, options?: Options) => {
       }
       if (!isCurrent() || busySessions.has(sessionID)) return
       const observed = await recordAssistantMessage(sessionID, latestAssistant, options ?? {}, true)
-      await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, observed.goal)
+      await reconcileLocalMarkerAfterProgress(
+        locallyDeliveredPendingSessions,
+        sessionID,
+        observed.goal,
+      )
       const queued = scheduledContinuations.get(sessionID)
-      if (observed.progressed && queued?.purpose !== "settle") cancelScheduledContinuation(sessionID)
+      if (observed.progressed && queued?.purpose !== "settle")
+        cancelScheduledContinuation(sessionID)
       if (scheduled && scheduledContinuations.get(sessionID) !== scheduled) return
       const current = await getGoalInternal(sessionID)
       if (!isCurrent() || !current) return
@@ -1728,11 +1984,16 @@ const server: Plugin = async ({ client }, options?: Options) => {
         if (!pendingReadyForFailure(attempt, deliveredLocally)) {
           return
         }
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-          requirePending: true,
-          expectedGoalID: current.id,
-          expectedAttemptID: attempt.id,
-        })
+        const afterFailure = await recordContinuationResult(
+          sessionID,
+          "failure",
+          maxPromptFailures,
+          {
+            requirePending: true,
+            expectedGoalID: current.id,
+            expectedAttemptID: attempt.id,
+          },
+        )
         if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
@@ -1761,7 +2022,12 @@ const server: Plugin = async ({ client }, options?: Options) => {
       attemptGoalID = goal.id
       attemptID = goal.pendingAttempt?.id
       const beforeDelivery = await getGoalInternal(sessionID)
-      if (!isCurrent() || !continuationStillReserved(goal, beforeDelivery) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID)) {
+      if (
+        !isCurrent() ||
+        !continuationStillReserved(goal, beforeDelivery) ||
+        busySessions.has(sessionID) ||
+        nativeRetrySessions.has(sessionID)
+      ) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         return
       }
@@ -1786,7 +2052,8 @@ const server: Plugin = async ({ client }, options?: Options) => {
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
       })
-      if (isCurrent() && delivered?.pendingAttempt?.delivered) locallyDeliveredPendingSessions.add(sessionID)
+      if (isCurrent() && delivered?.pendingAttempt?.delivered)
+        locallyDeliveredPendingSessions.add(sessionID)
       if (!delivered?.pendingAttempt?.delivered) {
         // The attempt was not present at delivery time (e.g. disposed mid-send):
         // do not leave a phantom reserved turn.
@@ -1805,10 +2072,15 @@ const server: Plugin = async ({ client }, options?: Options) => {
         // A transport failure is a real attempt: count it toward the
         // max_prompt_failures ceiling and schedule a bounded retry at the
         // remaining minimum interval. Keep the reserved autoTurn consumed.
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-          expectedGoalID: attemptGoalID,
-          expectedAttemptID: attemptID,
-        })
+        const afterFailure = await recordContinuationResult(
+          sessionID,
+          "failure",
+          maxPromptFailures,
+          {
+            expectedGoalID: attemptGoalID,
+            expectedAttemptID: attemptID,
+          },
+        )
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
@@ -1853,7 +2125,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       nativeRetrySessions.clear()
       toolAttempts.clear()
       explicitResumeRequests.clear()
-    objectiveEdits.clear()
+      objectiveEdits.clear()
     },
     async config(config) {
       if (!registerCommand) return
@@ -1861,8 +2133,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
     },
     tool: {
       get_goal: {
-        description:
-          messages.tools.getGoal,
+        description: messages.tools.getGoal,
         args: {},
         async execute(_args, context) {
           return getGoalToolResult(await getGoal(context.sessionID), messages)
@@ -1885,40 +2156,71 @@ const server: Plugin = async ({ client }, options?: Options) => {
         },
       },
       list_all_goals: {
-        description:
-          messages.tools.listAllGoals,
+        description: messages.tools.listAllGoals,
         args: {},
         async execute() {
           return JSON.stringify(await getAllGoals(), null, 2)
         },
       },
       create_goal: {
-        description:
-          messages.tools.createGoal,
+        description: messages.tools.createGoal,
         args: {
           objective: boundedGoalTextSchema(objectiveChars, messages.tools.objective, (value) =>
             validateObjective(value, objectiveChars),
           ),
-          token_budget: z.number().int().positive().nullable().optional().describe(messages.tools.tokenBudget),
-          max_auto_turns: z.number().int().positive().nullable().optional().describe(messages.tools.maxAutoTurns),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe(messages.tools.maxDurationSeconds),
+          token_budget: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.tokenBudget),
+          max_auto_turns: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.maxAutoTurns),
+          max_duration_seconds: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.maxDurationSeconds),
         },
         async execute(args, context) {
           return createGoalFromTool(args as CreateGoalArgs, context, goalServices)
         },
       },
       set_goal: {
-        description:
-          messages.tools.setGoal,
+        description: messages.tools.setGoal,
         args: {
-          objective: boundedGoalTextSchema(
-            objectiveChars,
-            messages.tools.modelObjective,
-            (value) => validateObjective(value, objectiveChars),
+          objective: boundedGoalTextSchema(objectiveChars, messages.tools.modelObjective, (value) =>
+            validateObjective(value, objectiveChars),
           ),
-          token_budget: z.number().int().positive().nullable().optional().describe(messages.tools.tokenBudget),
-          max_auto_turns: z.number().int().positive().nullable().optional().describe(messages.tools.maxAutoTurns),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe(messages.tools.maxDurationSeconds),
+          token_budget: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.tokenBudget),
+          max_auto_turns: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.maxAutoTurns),
+          max_duration_seconds: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.maxDurationSeconds),
         },
         async execute(args, context) {
           return createGoalFromTool(args as CreateGoalArgs, context, goalServices)
@@ -1927,34 +2229,38 @@ const server: Plugin = async ({ client }, options?: Options) => {
       update_goal_objective: {
         description: messages.tools.updateGoalObjective,
         args: {
-          objective: boundedGoalTextSchema(objectiveChars, messages.tools.updatedObjective, (value) =>
-            validateObjective(value, objectiveChars),
+          objective: boundedGoalTextSchema(
+            objectiveChars,
+            messages.tools.updatedObjective,
+            (value) => validateObjective(value, objectiveChars),
           ),
           status: z.enum(["active", "paused"]).optional().describe(messages.tools.editStatus),
         },
         async execute(args, context) {
-          return updateGoalObjectiveFromTool(args as { objective: string; status?: "active" | "paused" }, context, goalServices)
+          return updateGoalObjectiveFromTool(
+            args as { objective: string; status?: "active" | "paused" },
+            context,
+            goalServices,
+          )
         },
       },
       update_goal_plan: {
-        description: locale === "zh-CN" ? "保存目标的整体计划、阶段、任务和验证证据。保持整体目标不变；使用 get_goal 返回的目标 ID 和计划版本。" : "Persist the overall plan, phases, tasks, verification evidence and decisions. Preserve the goal scope; use the goal ID and planRevision from get_goal. Completed work cannot be silently reopened or removed.",
+        description:
+          locale === "zh-CN"
+            ? "保存目标的整体计划、阶段、任务和验证证据。保持整体目标不变；使用 get_goal 返回的目标 ID 和计划版本。"
+            : "Persist the overall plan, phases, tasks, verification evidence and decisions. Preserve the goal scope; use the goal ID and planRevision from get_goal. Completed work cannot be silently reopened or removed.",
         args: planToolArgs,
         execute: planFromTool,
       },
       update_goal: {
-        description:
-          messages.tools.updateGoal,
+        description: messages.tools.updateGoal,
         args: {
           status: z.enum(["complete", "unmet"]).describe(messages.tools.closeStatus),
-          evidence: boundedGoalTextSchema(
-            objectiveChars,
-            messages.tools.evidence,
-            (value) => validateEvidence(value, "completion evidence", objectiveChars),
+          evidence: boundedGoalTextSchema(objectiveChars, messages.tools.evidence, (value) =>
+            validateEvidence(value, "completion evidence", objectiveChars),
           ).optional(),
-          blocker: boundedGoalTextSchema(
-            objectiveChars,
-            messages.tools.blocker,
-            (value) => validateEvidence(value, "blocker", objectiveChars),
+          blocker: boundedGoalTextSchema(objectiveChars, messages.tools.blocker, (value) =>
+            validateEvidence(value, "blocker", objectiveChars),
           ).optional(),
         },
         async execute(args, context) {
@@ -1962,13 +2268,16 @@ const server: Plugin = async ({ client }, options?: Options) => {
         },
       },
       update_goal_status: {
-        description:
-          messages.tools.updateGoalStatus,
+        description: messages.tools.updateGoalStatus,
         args: {
           status: z.enum(["active", "paused"]).describe(messages.tools.activePausedStatus),
         },
         async execute(args, context) {
-          return updateGoalStatusFromTool(args as { status: "active" | "paused" }, context, goalServices)
+          return updateGoalStatusFromTool(
+            args as { status: "active" | "paused" },
+            context,
+            goalServices,
+          )
         },
       },
       stop_goal: {
@@ -1984,9 +2293,27 @@ const server: Plugin = async ({ client }, options?: Options) => {
           objective: boundedGoalTextSchema(objectiveChars, messages.tools.objective, (value) =>
             validateObjective(value, objectiveChars),
           ),
-          token_budget: z.number().int().positive().nullable().optional().describe(messages.tools.tokenBudget),
-          max_auto_turns: z.number().int().positive().nullable().optional().describe(messages.tools.maxAutoTurns),
-          max_duration_seconds: z.number().int().positive().nullable().optional().describe(messages.tools.maxDurationSeconds),
+          token_budget: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.tokenBudget),
+          max_auto_turns: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.maxAutoTurns),
+          max_duration_seconds: z
+            .number()
+            .int()
+            .positive()
+            .nullable()
+            .optional()
+            .describe(messages.tools.maxDurationSeconds),
         },
         async execute(args, context) {
           return replaceGoalFromTool(args as CreateGoalArgs, context, goalServices)
@@ -2011,11 +2338,16 @@ const server: Plugin = async ({ client }, options?: Options) => {
     },
     async "command.execute.before"(input, output) {
       if (input.command === commandName) {
-        const sanitized = escapeGoalCommandArguments(output, goalCommandTemplate(commandName, locale), input.arguments)
+        const sanitized = escapeGoalCommandArguments(
+          output,
+          goalCommandTemplate(commandName, locale),
+          input.arguments,
+        )
         objectiveEdits.delete(input.sessionID)
         const edit = /^edit\s+([\s\S]+)$/i.exec(input.arguments.trim())
         const goal = edit && sanitized ? await getGoal(input.sessionID) : null
-        if (goal && edit) objectiveEdits.set(input.sessionID, { goalID: goal.id, objective: edit[1]!.trim() })
+        if (goal && edit)
+          objectiveEdits.set(input.sessionID, { goalID: goal.id, objective: edit[1]!.trim() })
         if (sanitized && input.arguments.trim().toLowerCase() === "resume") {
           explicitResumeRequests.add(input.sessionID)
         }
@@ -2044,9 +2376,11 @@ const server: Plugin = async ({ client }, options?: Options) => {
       if (!sessionID) return
       if (GOAL_PLAN_TOOLS.has(input.tool)) {
         const goal = await getGoal(sessionID)
-        if (goal || input.tool === "clear_goal") output.metadata = { ...output.metadata, ...acpPlanMetadata(goal) }
+        if (goal || input.tool === "clear_goal")
+          output.metadata = { ...output.metadata, ...acpPlanMetadata(goal) }
       }
-      if (typeof input?.tool === "string" && NON_PROGRESS_TOOLS.has(input.tool.toLowerCase())) return
+      if (typeof input?.tool === "string" && NON_PROGRESS_TOOLS.has(input.tool.toLowerCase()))
+        return
       const toolResult = output as { output?: unknown; error?: unknown }
       // A successful tool output is real progress: it resolves any pending
       // continuation and clears the prompt-failure counter. Failed tool
@@ -2067,11 +2401,17 @@ const server: Plugin = async ({ client }, options?: Options) => {
       }
     },
     async "chat.message"(input, output) {
-      const sessionID = typeof input?.sessionID === "string" ? input.sessionID : output.message?.sessionID
-      const agent = typeof input?.agent === "string" && input.agent.trim() ? input.agent : output.message?.agent
+      const sessionID =
+        typeof input?.sessionID === "string" ? input.sessionID : output.message?.sessionID
+      const agent =
+        typeof input?.agent === "string" && input.agent.trim() ? input.agent : output.message?.agent
       if (typeof sessionID !== "string") return
       explicitResumeRequests.delete(sessionID)
-      if (output.parts?.some((part) => isExplicitResumePrompt(textFromPart(part), commandName, locale, messages))) {
+      if (
+        output.parts?.some((part) =>
+          isExplicitResumePrompt(textFromPart(part), commandName, locale, messages),
+        )
+      ) {
         explicitResumeRequests.add(sessionID)
       }
       if (typeof agent !== "string" || !agent.trim()) return
@@ -2082,14 +2422,24 @@ const server: Plugin = async ({ client }, options?: Options) => {
       const sessionID =
         "sessionID" in input && typeof input.sessionID === "string"
           ? input.sessionID
-          : output.messages.find((message) => typeof message.info.sessionID === "string")?.info.sessionID
+          : output.messages.find((message) => typeof message.info.sessionID === "string")?.info
+              .sessionID
       if (!sessionID) return
       const usage = usageFromMessages(output.messages)
       await accountUsage(sessionID, usage.tokens, { cumulative: true, source: usage.source })
-      const observed = await recordAssistantMessage(sessionID, latestAssistantMessage(output.messages), options ?? {})
-      await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, observed.goal)
+      const observed = await recordAssistantMessage(
+        sessionID,
+        latestAssistantMessage(output.messages),
+        options ?? {},
+      )
+      await reconcileLocalMarkerAfterProgress(
+        locallyDeliveredPendingSessions,
+        sessionID,
+        observed.goal,
+      )
       const scheduled = scheduledContinuations.get(sessionID)
-      if (observed.progressed && scheduled?.purpose !== "settle") cancelScheduledContinuation(sessionID)
+      if (observed.progressed && scheduled?.purpose !== "settle")
+        cancelScheduledContinuation(sessionID)
     },
     async "experimental.chat.system.transform"(input, output) {
       if (typeof input.sessionID !== "string") return
@@ -2174,9 +2524,14 @@ const server: Plugin = async ({ client }, options?: Options) => {
             if (attempt != null) {
               // The pending attempt failed at the transport level: count one
               // failure and retry at the remaining min interval.
-              const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-                requirePending: true,
-              })
+              const afterFailure = await recordContinuationResult(
+                sessionID,
+                "failure",
+                maxPromptFailures,
+                {
+                  requirePending: true,
+                },
+              )
               if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
               if (autoContinue && afterFailure?.status === "active") {
                 scheduleSettledContinuation(
@@ -2215,14 +2570,21 @@ const server: Plugin = async ({ client }, options?: Options) => {
       }
       if (sessionID && (event as { type?: string }).type === "message.updated") {
         const props = (event as { properties?: Record<string, unknown> }).properties ?? {}
-        const message = [props.info, props.message].find((value) => value && typeof value === "object") as
+        const message = [props.info, props.message].find(
+          (value) => value && typeof value === "object",
+        ) as
           | { info?: unknown; role?: unknown; id?: unknown; time?: unknown; parts?: unknown[] }
           | undefined
         taskTracker.observeAssistantMessage(sessionID, message)
         const observed = await recordAssistantMessage(sessionID, message, options ?? {})
-        await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, observed.goal)
+        await reconcileLocalMarkerAfterProgress(
+          locallyDeliveredPendingSessions,
+          sessionID,
+          observed.goal,
+        )
         const scheduled = scheduledContinuations.get(sessionID)
-        if (observed.progressed && scheduled?.purpose !== "settle") cancelScheduledContinuation(sessionID)
+        if (observed.progressed && scheduled?.purpose !== "settle")
+          cancelScheduledContinuation(sessionID)
       }
 
       if (!isIdleEvent(event as never)) return
@@ -2235,7 +2597,10 @@ const server: Plugin = async ({ client }, options?: Options) => {
 
 function v2ErrorLog(message: string, error: unknown) {
   try {
-    console.error(`[opencode-goal-plugin] ${message}:`, error instanceof Error ? error.message : String(error))
+    console.error(
+      `[opencode-goal-plugin] ${message}:`,
+      error instanceof Error ? error.message : String(error),
+    )
   } catch {
     // Logging must never break plugin control flow.
   }
@@ -2246,12 +2611,15 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   const autoContinue = options.auto_continue ?? true
   const deferWhileTasksActive = options.defer_while_tasks_active ?? true
   const maxAutoTurns = positiveIntegerOrNull(options.max_auto_turns) ?? DEFAULT_MAX_AUTO_TURNS
-  const minInterval = nonNegativeIntegerOrNull(options.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS
+  const minInterval =
+    nonNegativeIntegerOrNull(options.min_continue_interval_seconds) ??
+    DEFAULT_CONTINUE_INTERVAL_SECONDS
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options.max_turn_time)
   const maxTaskBlockMs = timeoutMillisecondsFromSeconds(
     options.max_task_block_seconds ?? DEFAULT_MAX_TASK_BLOCK_SECONDS,
   )
-  const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
+  const maxPromptFailures =
+    positiveIntegerOrNull(options.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
   const registerCommand = options.register_command ?? true
   const commandName = commandNameFromOptions(options)
   const locale = resolveLocale(options.locale)
@@ -2271,7 +2639,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   const explicitResumeRequests = new Set<string>()
   const objectiveEdits = new Map<string, { goalID: string; objective: string }>()
   const planAgents = restrictedAgentSet(options)
-  const isPlanAgent = (agent: unknown) => typeof agent === "string" && planAgents.has(agent.trim().toLowerCase())
+  const isPlanAgent = (agent: unknown) =>
+    typeof agent === "string" && planAgents.has(agent.trim().toLowerCase())
   const activeContinuationsV2 = new Set<string>()
   const restartAfterContinuation = new Set<string>()
   const continuationEpochs = new ContinuationEpochs()
@@ -2291,13 +2660,20 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     consumeAutoTurnReset: (sessionID) => explicitResumeRequests.delete(sessionID),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID)
-      if (!edit || (edit.objective !== objective.trim() && escapeXmlText(edit.objective) !== objective.trim())) return
+      if (
+        !edit ||
+        (edit.objective !== objective.trim() && escapeXmlText(edit.objective) !== objective.trim())
+      )
+        return
       objectiveEdits.delete(sessionID)
       return edit
     },
     initializeUsage: async (sessionID) => {
       try {
-        await accountUsage(sessionID, stepTokenSums.get(sessionID) ?? 0, { cumulative: true, source: "v2.steps" })
+        await accountUsage(sessionID, stepTokenSums.get(sessionID) ?? 0, {
+          cumulative: true,
+          source: "v2.steps",
+        })
       } catch (error) {
         v2ErrorLog("Failed to initialize goal usage accounting", error)
       }
@@ -2308,7 +2684,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (mode === "stop") clearTurnWatchdog(sessionID)
       taskDeferredSessions.delete(sessionID)
       locallyDeliveredPendingSessions.delete(sessionID)
-      if (mode === "replace" && activeContinuationsV2.has(sessionID)) restartAfterContinuation.add(sessionID)
+      if (mode === "replace" && activeContinuationsV2.has(sessionID))
+        restartAfterContinuation.add(sessionID)
       else restartAfterContinuation.delete(sessionID)
       if (mode === "replace") stoppedExecutions.delete(sessionID)
       else stoppedExecutions.add(sessionID)
@@ -2367,7 +2744,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     try {
       if (disposed) return
       await taskRecoveryComplete
-      if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID) || watchdogRescuedSessions.has(sessionID))
+      if (
+        turnWatchdogs.get(sessionID) !== watchdog ||
+        !busySessions.has(sessionID) ||
+        watchdogRescuedSessions.has(sessionID)
+      )
         return
       const goal = await getGoal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
@@ -2379,7 +2760,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (taskStatus && taskStatus.blocked) return
       const current = await getGoalInternal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
-      if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuationsV2.has(sessionID)) return
+      if (
+        current?.status !== "active" ||
+        isPlanAgent(current.lastPromptAgent) ||
+        activeContinuationsV2.has(sessionID)
+      )
+        return
 
       turnWatchdogs.delete(sessionID)
       activeContinuationsV2.add(sessionID)
@@ -2387,7 +2773,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       claimedGoalID = current.id
       watchdogRescuedSessions.add(sessionID)
       if (!isCurrent()) return
-      await sendContinuation(sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestStep?.agent ?? null)
+      await sendContinuation(
+        sessionID,
+        continuationPrompt(current, locale),
+        current.lastPromptAgent ?? latestStep?.agent ?? null,
+      )
       // Watchdog rescues are untracked retries: a delivered prompt arms the
       // pending-continuation window but never consumes an auto-turn or
       // no-progress budget (armNoProgress: false). The rescue delivers while
@@ -2408,7 +2798,9 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           // Watchdog rescues share the same prompt-failure ceiling: recognized
           // transport errors accumulate toward max_prompt_failures without
           // consuming auto-turn budgets.
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID })
+          await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+            expectedGoalID: claimedGoalID,
+          })
         }
         v2ErrorLog("Turn watchdog retry failed", error)
       } catch {
@@ -2417,7 +2809,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     } finally {
       if (claimedContinuation) {
         activeContinuationsV2.delete(sessionID)
-        if (restartAfterContinuation.delete(sessionID) && !disposed && !busySessions.has(sessionID)) {
+        if (
+          restartAfterContinuation.delete(sessionID) &&
+          !disposed &&
+          !busySessions.has(sessionID)
+        ) {
           scheduleSettledContinuation(sessionID)
         }
       }
@@ -2441,19 +2837,31 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     if (!replace && scheduledContinuations.has(sessionID)) return
     if (replace) cancelScheduledContinuation(sessionID)
     const scheduled = {} as ScheduledContinuation
-    const timer = setTimeout(async () => {
-      try {
-        if (scheduledContinuations.get(sessionID) !== scheduled || nativeRetrySessions.has(sessionID)) return
-        if (purpose === "retry") {
-          const goal = await getGoalInternal(sessionID)
-          if (!goal || (goal.continuationFailures === 0 && goal.pendingAttempt == null)) return
+    const timer = setTimeout(
+      async () => {
+        try {
+          if (
+            scheduledContinuations.get(sessionID) !== scheduled ||
+            nativeRetrySessions.has(sessionID)
+          )
+            return
+          if (purpose === "retry") {
+            const goal = await getGoalInternal(sessionID)
+            if (!goal || (goal.continuationFailures === 0 && goal.pendingAttempt == null)) return
+          }
+          if (
+            scheduledContinuations.get(sessionID) !== scheduled ||
+            nativeRetrySessions.has(sessionID)
+          )
+            return
+          await runAutoContinue(sessionID, true, scheduled)
+        } finally {
+          if (scheduledContinuations.get(sessionID) === scheduled)
+            scheduledContinuations.delete(sessionID)
         }
-        if (scheduledContinuations.get(sessionID) !== scheduled || nativeRetrySessions.has(sessionID)) return
-        await runAutoContinue(sessionID, true, scheduled)
-      } finally {
-        if (scheduledContinuations.get(sessionID) === scheduled) scheduledContinuations.delete(sessionID)
-      }
-    }, Math.max(0, delayMs))
+      },
+      Math.max(0, delayMs),
+    )
     scheduled.timer = timer
     scheduled.purpose = purpose
     const maybeUnref = timer as { unref?: () => void }
@@ -2461,7 +2869,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     scheduledContinuations.set(sessionID, scheduled)
   }
 
-  async function runAutoContinue(sessionID: string, fromTaskDeferral = false, scheduled?: ScheduledContinuation) {
+  async function runAutoContinue(
+    sessionID: string,
+    fromTaskDeferral = false,
+    scheduled?: ScheduledContinuation,
+  ) {
     if (disposed) return
     if (stoppedExecutions.has(sessionID)) return
     if (busySessions.has(sessionID)) return
@@ -2480,7 +2892,9 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     try {
       const latestStep = latestStepBySession.get(sessionID)
       if (latestStep?.messageID) {
-        taskTracker.observeAssistantMessage(sessionID, { info: { id: latestStep.messageID, role: "assistant" } })
+        taskTracker.observeAssistantMessage(sessionID, {
+          info: { id: latestStep.messageID, role: "assistant" },
+        })
       }
       const taskStatus = taskBlockStatus(sessionID)
       if (taskStatus && taskStatus.blocked) {
@@ -2526,7 +2940,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
               after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")),
         )
         const queuedAfterProgress = scheduledContinuations.get(sessionID)
-        if (progressed && queuedAfterProgress?.purpose !== "settle") cancelScheduledContinuation(sessionID)
+        if (progressed && queuedAfterProgress?.purpose !== "settle")
+          cancelScheduledContinuation(sessionID)
       }
       if (scheduled && scheduledContinuations.get(sessionID) !== scheduled) return
       const current = await getGoalInternal(sessionID)
@@ -2550,11 +2965,16 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         if (!pendingReadyForFailure(attempt, deliveredLocally)) {
           return
         }
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-          requirePending: true,
-          expectedGoalID: current.id,
-          expectedAttemptID: attempt.id,
-        })
+        const afterFailure = await recordContinuationResult(
+          sessionID,
+          "failure",
+          maxPromptFailures,
+          {
+            requirePending: true,
+            expectedGoalID: current.id,
+            expectedAttemptID: attempt.id,
+          },
+        )
         if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
@@ -2578,7 +2998,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         // There may be no further idle event, so retain a timed wake-up rather
         // than dropping the only continuation signal.
         const waiting = await getGoalInternal(sessionID)
-        if (waiting?.status === "active" && waiting.pendingAttempt == null && waiting.lastContinuationAt != null && minInterval > 0) {
+        if (
+          waiting?.status === "active" &&
+          waiting.pendingAttempt == null &&
+          waiting.lastContinuationAt != null &&
+          minInterval > 0
+        ) {
           scheduleSettledContinuation(
             sessionID,
             continuationDelayFromSnapshot(minInterval, waiting.lastContinuationAt),
@@ -2591,7 +3016,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       attemptGoalID = goal.id
       attemptID = goal.pendingAttempt?.id
       const beforeDelivery = await getGoalInternal(sessionID)
-      if (!isCurrent() || !continuationStillReserved(goal, beforeDelivery) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID)) {
+      if (
+        !isCurrent() ||
+        !continuationStillReserved(goal, beforeDelivery) ||
+        busySessions.has(sessionID) ||
+        nativeRetrySessions.has(sessionID)
+      ) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         return
       }
@@ -2617,7 +3047,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
       })
-      if (isCurrent() && delivered?.pendingAttempt?.delivered) locallyDeliveredPendingSessions.add(sessionID)
+      if (isCurrent() && delivered?.pendingAttempt?.delivered)
+        locallyDeliveredPendingSessions.add(sessionID)
       if (!delivered?.pendingAttempt?.delivered) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
       }
@@ -2630,10 +3061,15 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         return
       }
       if (isTransportError(error)) {
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-          expectedGoalID: attemptGoalID,
-          expectedAttemptID: attemptID,
-        })
+        const afterFailure = await recordContinuationResult(
+          sessionID,
+          "failure",
+          maxPromptFailures,
+          {
+            expectedGoalID: attemptGoalID,
+            expectedAttemptID: attemptID,
+          },
+        )
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
@@ -2692,9 +3128,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       try {
         const response = await context.session.get({ sessionID })
         const record = response as { data?: unknown } | undefined
-        const info = record && typeof record === "object" && "data" in record
-          ? record.data
-          : response
+        const info =
+          record && typeof record === "object" && "data" in record ? record.data : response
         const location = (info as { location?: unknown } | null | undefined)?.location
         const owned = locationRefMatches(
           location as { directory?: unknown; workspaceID?: unknown } | null | undefined,
@@ -2733,7 +3168,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         foreign = !locationRefMatches(event.location, context.location)
         markSessionOwnership(sessionID, !foreign)
       } else if (event.type === "session.created" && isRecord(data.location)) {
-        foreign = !locationRefMatches(data.location as { directory?: unknown; workspaceID?: unknown }, context.location)
+        foreign = !locationRefMatches(
+          data.location as { directory?: unknown; workspaceID?: unknown },
+          context.location,
+        )
         markSessionOwnership(sessionID, !foreign)
       } else {
         foreign = !(await ownsSession(sessionID))
@@ -2741,13 +3179,27 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     }
     if (foreign) {
       if (event.type === "session.created" && sessionID && typeof data.parentID === "string") {
-        taskTracker.observeSessionCreated({ properties: { info: { id: sessionID, parentID: data.parentID } } })
+        taskTracker.observeSessionCreated({
+          properties: { info: { id: sessionID, parentID: data.parentID } },
+        })
       } else if (sessionID) {
-        if (event.type === "session.execution.started") taskTracker.observeSessionStatus(sessionID, "busy")
-        if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.idle"].includes(event.type)) {
+        if (event.type === "session.execution.started")
+          taskTracker.observeSessionStatus(sessionID, "busy")
+        if (
+          [
+            "session.execution.succeeded",
+            "session.execution.failed",
+            "session.execution.interrupted",
+            "session.idle",
+          ].includes(event.type)
+        ) {
           taskTracker.observeSessionStatus(sessionID, "idle")
         }
-        if (event.type === "session.status" && isRecord(data.status) && typeof data.status.type === "string") {
+        if (
+          event.type === "session.status" &&
+          isRecord(data.status) &&
+          typeof data.status.type === "string"
+        ) {
           taskTracker.observeSessionStatus(sessionID, data.status.type)
         }
         if (event.type === "session.deleted") {
@@ -2773,9 +3225,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       case "session.execution.started":
       case "session.retry.scheduled":
       case "session.status": {
-        const status = event.type === "session.execution.started"
-          ? { type: "busy" }
-          : event.type === "session.retry.scheduled" ? { type: "retry" } : data.status
+        const status =
+          event.type === "session.execution.started"
+            ? { type: "busy" }
+            : event.type === "session.retry.scheduled"
+              ? { type: "retry" }
+              : data.status
         if (sessionID && isRecord(status) && typeof status.type === "string") {
           if (status.type === "busy") {
             stoppedExecutions.delete(sessionID)
@@ -2863,9 +3318,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal)
             if (attempt != null) {
-              const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-                requirePending: true,
-              })
+              const afterFailure = await recordContinuationResult(
+                sessionID,
+                "failure",
+                maxPromptFailures,
+                {
+                  requirePending: true,
+                },
+              )
               if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
               if (autoContinue && afterFailure?.status === "active") {
                 scheduleSettledContinuation(
@@ -2915,7 +3375,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         return
       }
       case "session.agent.selected": {
-        if (sessionID && typeof data.agent === "string") await recordPromptAgent(sessionID, data.agent)
+        if (sessionID && typeof data.agent === "string")
+          await recordPromptAgent(sessionID, data.agent)
         return
       }
       case "session.step.started": {
@@ -2926,19 +3387,34 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         taskTracker.observeAssistantMessage(sessionID, {
           info: { id: messageID, role: "assistant", time: { completed: event.created } },
         })
-        if (!stepTextBuffers.has(stepKey(sessionID, messageID))) stepTextBuffers.set(stepKey(sessionID, messageID), "")
-        latestStepBySession.set(sessionID, { messageID, agent, text: "", outputTokens: null, completedAt: event.created })
+        if (!stepTextBuffers.has(stepKey(sessionID, messageID)))
+          stepTextBuffers.set(stepKey(sessionID, messageID), "")
+        latestStepBySession.set(sessionID, {
+          messageID,
+          agent,
+          text: "",
+          outputTokens: null,
+          completedAt: event.created,
+        })
         return
       }
       case "session.text.delta": {
-        if (sessionID && typeof data.assistantMessageID === "string" && typeof data.delta === "string") {
+        if (
+          sessionID &&
+          typeof data.assistantMessageID === "string" &&
+          typeof data.delta === "string"
+        ) {
           const key = stepKey(sessionID, data.assistantMessageID)
           stepTextBuffers.set(key, (stepTextBuffers.get(key) ?? "") + data.delta)
         }
         return
       }
       case "session.text.ended": {
-        if (sessionID && typeof data.assistantMessageID === "string" && typeof data.text === "string") {
+        if (
+          sessionID &&
+          typeof data.assistantMessageID === "string" &&
+          typeof data.text === "string"
+        ) {
           stepTextBuffers.set(stepKey(sessionID, data.assistantMessageID), data.text)
         }
         return
@@ -2967,7 +3443,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           maxNoProgressTurns: positiveIntegerOrNull(options.max_no_progress_turns),
           completedAt: event.created,
         })
-        await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, afterStep)
+        await reconcileLocalMarkerAfterProgress(
+          locallyDeliveredPendingSessions,
+          sessionID,
+          afterStep,
+        )
         // Substantive output from the model proves the transport recovered, so
         // any pending automatic recovery timer is no longer needed.
         if (/[\p{L}\p{N}]/u.test(text)) {
@@ -3007,7 +3487,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           maxNoProgressTurns: positiveIntegerOrNull(options.max_no_progress_turns),
           completedAt: event.created,
         })
-        await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, afterStep)
+        await reconcileLocalMarkerAfterProgress(
+          locallyDeliveredPendingSessions,
+          sessionID,
+          afterStep,
+        )
         if (/[\p{L}\p{N}]/u.test(text)) {
           const scheduled = scheduledContinuations.get(sessionID)
           if (scheduled?.purpose === "recovery") cancelScheduledContinuation(sessionID)
@@ -3024,14 +3508,17 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       case "session.usage.updated": {
         if (!sessionID) return
         const tokens = tokensFromRecord(data.tokens)
-        if (typeof tokens === "number") await accountUsage(sessionID, tokens, { cumulative: true, source: "v2.session" })
+        if (typeof tokens === "number")
+          await accountUsage(sessionID, tokens, { cumulative: true, source: "v2.session" })
         return
       }
     }
   }
 
   if (registerCommand) {
-    const existingCommands = new Set((await context.command.list()).data.map((command) => command.name))
+    const existingCommands = new Set(
+      (await context.command.list()).data.map((command) => command.name),
+    )
     registrations.push(
       await context.command.transform((draft) => {
         const claimedCommands = new Set(existingCommands)
@@ -3044,9 +3531,16 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
             execute: async (input, execution?: { signal?: AbortSignal }) => {
               // Command execution is routed to the session's owning location.
               objectiveEdits.delete(input.sessionID)
-              const edit = command.action === "goal" ? /^edit\s+([\s\S]+)$/i.exec(input.prompt.text.trim()) : null
+              const edit =
+                command.action === "goal"
+                  ? /^edit\s+([\s\S]+)$/i.exec(input.prompt.text.trim())
+                  : null
               const editedGoal = edit ? await getGoal(input.sessionID) : null
-              if (editedGoal && edit) objectiveEdits.set(input.sessionID, { goalID: editedGoal.id, objective: edit[1]!.trim() })
+              if (editedGoal && edit)
+                objectiveEdits.set(input.sessionID, {
+                  goalID: editedGoal.id,
+                  objective: edit[1]!.trim(),
+                })
               markSessionOwnership(input.sessionID, true)
               if (command.action === "pause") {
                 const goal = await getGoal(input.sessionID)
@@ -3062,7 +3556,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
               }
               let forwardedPrompt: Partial<typeof input.prompt> = {}
               if (command.action === "goal") {
-                const stripMention = <T extends { mention?: unknown }>({ mention: _mention, ...attachment }: T) => attachment
+                const stripMention = <T extends { mention?: unknown }>({
+                  mention: _mention,
+                  ...attachment
+                }: T) => attachment
                 const { files, agents, skills, ...promptFields } = input.prompt
                 forwardedPrompt = {
                   ...omitUndefined(promptFields),
@@ -3072,8 +3569,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                 }
               }
               const args = input.prompt.text.trim().toLowerCase()
-              const controlOnly = /^(history|status|show|current|pause|stop|cancel|clear|off|reset|none|edit)(?:\s|$)/.test(args)
-              const pursue = command.action === "resume" || (command.action === "goal" && args !== "" && !controlOnly)
+              const controlOnly =
+                /^(history|status|show|current|pause|stop|cancel|clear|off|reset|none|edit)(?:\s|$)/.test(
+                  args,
+                )
+              const pursue =
+                command.action === "resume" ||
+                (command.action === "goal" && args !== "" && !controlOnly)
               const signal = execution?.signal
                 ? AbortSignal.any([abortController.signal, execution.signal])
                 : abortController.signal
@@ -3092,7 +3594,9 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                 await context.session.prompt({
                   ...forwardedPrompt,
                   sessionID: input.sessionID,
-                  text: command.template.replaceAll("$ARGUMENTS", () => escapeXmlText(input.prompt.text.trim())),
+                  text: command.template.replaceAll("$ARGUMENTS", () =>
+                    escapeXmlText(input.prompt.text.trim()),
+                  ),
                   delivery: input.delivery,
                 })
                 admitted = true
@@ -3123,7 +3627,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                   goalServices.stopAutonomy?.(input.sessionID)
                   v2ErrorLog("Goal command wait failed; autonomous continuation stopped", error)
                   try {
-                    if ((await getGoal(input.sessionID))?.status === "active") await setGoalStatus(input.sessionID, "paused")
+                    if ((await getGoal(input.sessionID))?.status === "active")
+                      await setGoalStatus(input.sessionID, "paused")
                   } catch (stateError) {
                     v2ErrorLog("Failed to pause goal after command failure", stateError)
                   }
@@ -3136,7 +3641,6 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         }
       }),
     )
-
   }
 
   if (registerCommand) {
@@ -3181,15 +3685,17 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       name: "interrupt",
       callback: (event: { sessionID: string }) => Promise<void>,
     ) => Promise<{ dispose(): Promise<void> }>
-    registrations.push(await hookInterrupt("interrupt", async ({ sessionID }) => {
-      markSessionOwnership(sessionID, true)
-      goalServices.stopAutonomy?.(sessionID)
-      try {
-        await cancelActiveGoal(sessionID)
-      } catch (error) {
-        v2ErrorLog("Failed to persist explicit session cancellation", error)
-      }
-    }))
+    registrations.push(
+      await hookInterrupt("interrupt", async ({ sessionID }) => {
+        markSessionOwnership(sessionID, true)
+        goalServices.stopAutonomy?.(sessionID)
+        try {
+          await cancelActiveGoal(sessionID)
+        } catch (error) {
+          v2ErrorLog("Failed to persist explicit session cancellation", error)
+        }
+      }),
+    )
   } catch {
     // Host predates the explicit session interruption hook.
   }
@@ -3224,7 +3730,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (input.status !== "completed") return
       if (sessionID && GOAL_PLAN_TOOLS.has(input.tool)) {
         const goal = await getGoal(sessionID)
-        if (goal || input.tool === "clear_goal") input.result = { ...input.result, metadata: { ...input.result.metadata, ...acpPlanMetadata(goal) } }
+        if (goal || input.tool === "clear_goal")
+          input.result = {
+            ...input.result,
+            metadata: { ...input.result.metadata, ...acpPlanMetadata(goal) },
+          }
       }
       const text = textFromToolResult(input.result)
       taskTracker.noteTaskOutput(
@@ -3255,7 +3765,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   registrations.push(
     await context.session.hook("context", (sessionContext) => {
       const reminder = systemReminder(locale)
-      if (sessionContext.system.some((part) => part.type === "text" && part.text.includes(reminder))) return
+      if (
+        sessionContext.system.some((part) => part.type === "text" && part.text.includes(reminder))
+      )
+        return
       sessionContext.system.push({ type: "text", text: reminder })
     }),
   )
@@ -3275,7 +3788,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       await hookCompaction("compaction", async (event) => {
         const goal = await getGoal(event.sessionID)
         if (!goal) return
-        if (event.system.some((part) => part.type === "text" && part.text.startsWith(compactionContextPrefix(locale)))) return
+        if (
+          event.system.some(
+            (part) => part.type === "text" && part.text.startsWith(compactionContextPrefix(locale)),
+          )
+        )
+          return
         event.system.push({ type: "text", text: compactionContext(goal, locale) })
       }),
     )
@@ -3360,15 +3878,17 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
   return [
     {
       name: "update_goal_plan",
-      description: services.locale === "zh-CN" ? "保存目标的整体计划、阶段、任务和验证证据。保持整体目标不变；使用 get_goal 返回的目标 ID 和计划版本。" : "Persist the overall plan, phases, tasks, verification evidence and decisions. Preserve the goal scope; use the goal ID and planRevision from get_goal. Completed work cannot be silently reopened or removed.",
+      description:
+        services.locale === "zh-CN"
+          ? "保存目标的整体计划、阶段、任务和验证证据。保持整体目标不变；使用 get_goal 返回的目标 ID 和计划版本。"
+          : "Persist the overall plan, phases, tasks, verification evidence and decisions. Preserve the goal scope; use the goal ID and planRevision from get_goal. Completed work cannot be silently reopened or removed.",
       input: planToolInputSchema(),
       options: { codemode: false },
       execute: async (args, context) => ({ content: await planFromTool(args, context) }),
     },
     {
       name: "get_goal",
-      description:
-        messages.tools.getGoal,
+      description: messages.tools.getGoal,
       input: v2ObjectSchema({}),
       options: { codemode: false },
       execute: async (_args, toolContext) => ({
@@ -3397,8 +3917,7 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
     },
     {
       name: "list_all_goals",
-      description:
-        messages.tools.listAllGoals,
+      description: messages.tools.listAllGoals,
       input: v2ObjectSchema({}),
       options: { codemode: false },
       execute: async () => ({
@@ -3407,14 +3926,25 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
     },
     {
       name: "create_goal",
-      description:
-        messages.tools.createGoal,
+      description: messages.tools.createGoal,
       input: v2ObjectSchema(
         {
           objective: v2GoalTextSchema(services.maxObjectiveChars, messages.tools.objective),
-          token_budget: { type: ["integer", "null"], minimum: 1, description: messages.tools.tokenBudget },
-          max_auto_turns: { type: ["integer", "null"], minimum: 1, description: messages.tools.maxAutoTurns },
-          max_duration_seconds: { type: ["integer", "null"], minimum: 1, description: messages.tools.maxDurationSeconds },
+          token_budget: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.tokenBudget,
+          },
+          max_auto_turns: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.maxAutoTurns,
+          },
+          max_duration_seconds: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.maxDurationSeconds,
+          },
         },
         ["objective"],
       ),
@@ -3425,14 +3955,25 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
     },
     {
       name: "set_goal",
-      description:
-        messages.tools.setGoal,
+      description: messages.tools.setGoal,
       input: v2ObjectSchema(
         {
           objective: v2GoalTextSchema(services.maxObjectiveChars, messages.tools.modelObjective),
-          token_budget: { type: ["integer", "null"], minimum: 1, description: messages.tools.tokenBudget },
-          max_auto_turns: { type: ["integer", "null"], minimum: 1, description: messages.tools.maxAutoTurns },
-          max_duration_seconds: { type: ["integer", "null"], minimum: 1, description: messages.tools.maxDurationSeconds },
+          token_budget: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.tokenBudget,
+          },
+          max_auto_turns: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.maxAutoTurns,
+          },
+          max_duration_seconds: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.maxDurationSeconds,
+          },
         },
         ["objective"],
       ),
@@ -3447,19 +3988,26 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
       input: v2ObjectSchema(
         {
           objective: v2GoalTextSchema(services.maxObjectiveChars, messages.tools.updatedObjective),
-          status: { type: "string", enum: ["active", "paused"], description: messages.tools.editStatus },
+          status: {
+            type: "string",
+            enum: ["active", "paused"],
+            description: messages.tools.editStatus,
+          },
         },
         ["objective"],
       ),
       options: { codemode: false },
       execute: async (args, toolContext) => ({
-        content: await updateGoalObjectiveFromTool(args as { objective: string; status?: "active" | "paused" }, toolContext, services),
+        content: await updateGoalObjectiveFromTool(
+          args as { objective: string; status?: "active" | "paused" },
+          toolContext,
+          services,
+        ),
       }),
     },
     {
       name: "update_goal",
-      description:
-        messages.tools.updateGoal,
+      description: messages.tools.updateGoal,
       input: v2ObjectSchema(
         {
           status: {
@@ -3467,14 +4015,8 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
             enum: ["complete", "unmet"],
             description: messages.tools.closeStatus,
           },
-          evidence: v2GoalTextSchema(
-            services.maxObjectiveChars,
-            messages.tools.evidence,
-          ),
-          blocker: v2GoalTextSchema(
-            services.maxObjectiveChars,
-            messages.tools.blocker,
-          ),
+          evidence: v2GoalTextSchema(services.maxObjectiveChars, messages.tools.evidence),
+          blocker: v2GoalTextSchema(services.maxObjectiveChars, messages.tools.blocker),
         },
         ["status"],
       ),
@@ -3485,8 +4027,7 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
     },
     {
       name: "update_goal_status",
-      description:
-        messages.tools.updateGoalStatus,
+      description: messages.tools.updateGoalStatus,
       input: v2ObjectSchema(
         {
           status: {
@@ -3499,7 +4040,11 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
       ),
       options: { codemode: false },
       execute: async (args, toolContext) => ({
-        content: await updateGoalStatusFromTool(args as { status: "active" | "paused" }, toolContext, services),
+        content: await updateGoalStatusFromTool(
+          args as { status: "active" | "paused" },
+          toolContext,
+          services,
+        ),
       }),
     },
     {
@@ -3517,9 +4062,21 @@ function goalToolsV2(services: GoalServices): ToolV2Info[] {
       input: v2ObjectSchema(
         {
           objective: v2GoalTextSchema(services.maxObjectiveChars, messages.tools.objective),
-          token_budget: { type: ["integer", "null"], minimum: 1, description: messages.tools.tokenBudget },
-          max_auto_turns: { type: ["integer", "null"], minimum: 1, description: messages.tools.maxAutoTurns },
-          max_duration_seconds: { type: ["integer", "null"], minimum: 1, description: messages.tools.maxDurationSeconds },
+          token_budget: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.tokenBudget,
+          },
+          max_auto_turns: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.maxAutoTurns,
+          },
+          max_duration_seconds: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: messages.tools.maxDurationSeconds,
+          },
         },
         ["objective"],
       ),
