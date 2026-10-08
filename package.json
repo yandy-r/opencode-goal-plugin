@@ -74,7 +74,7 @@
     "@commitlint/config-conventional": "^21.2.3",
     "@eslint/js": "^10.0.1",
     "@opencode/client": "2.0.23",
-    "@opencode/plugin": "0.0.0-beta-19425",
+    "@opencode/plugin": "2.0.23",
     "@opencode/schema": "0.0.0-beta-19425",
     "@opencode/theme": "0.0.0-beta-19425",
     "@opentui/core": "0.5.9",
