@@ -2,7 +2,3 @@
 dist/
 node_modules/
 plans/
-.codex/config.toml
-.cursor/mcp.json
-.mcp.json
-opencode.json
