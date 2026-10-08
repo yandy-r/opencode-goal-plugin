@@ -4962,8 +4962,15 @@ async function setupV2(context) {
         if (done)
           break;
         const event = decodeV2Event(value);
-        if (event)
+        if (!event)
+          continue;
+        try {
           await handleV2Event(event);
+        } catch (error) {
+          if (disposed || abortController.signal.aborted)
+            break;
+          v2ErrorLog(`V2 event handling failed (${event.type})`, error);
+        }
       }
     } catch (error) {
       if (!abortController.signal.aborted)

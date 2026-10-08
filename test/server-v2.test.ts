@@ -517,6 +517,45 @@ test("V2 create_goal recovers from a zero-filled state file", async () => {
   await cleanup()
 })
 
+test("V2 event consumer survives a failed event and handles later events", async () => {
+  const mock = makeMockContext({ auto_continue: true, min_continue_interval_seconds: 0 })
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "survive a bad state read")
+  const file = process.env.OPENCODE_GOAL_STATE_PATH!
+  const good = await readFile(file, "utf8")
+
+  await writeFile(file, "{not json", "utf8")
+  const failed = mock.stream.push({
+    type: "session.execution.succeeded",
+    created: Date.now(),
+    data: { sessionID: "ses_v2" },
+  })
+  // The stream only marks an event processed once the consumer asks for the
+  // next one, so this settles only if the consumer outlives the failure.
+  let stallTimer: ReturnType<typeof setTimeout> | undefined
+  const outcome = await Promise.race([
+    failed.then(() => "consumed"),
+    new Promise((resolve) => {
+      stallTimer = setTimeout(() => resolve("stalled"), 3_000)
+    }),
+  ])
+  clearTimeout(stallTimer)
+  expect(outcome).toBe("consumed")
+  expect(mock.promptCalls).toHaveLength(0)
+
+  await writeFile(file, good, "utf8")
+  await mock.stream.push({
+    type: "session.execution.succeeded",
+    created: Date.now(),
+    data: { sessionID: "ses_v2" },
+  })
+  await waitFor(() => mock.promptCalls.length === 1)
+  expect(mock.promptCalls[0]?.text).toContain("survive a bad state read")
+
+  mock.stream.end()
+  await cleanup()
+})
+
 test("V2 create_goal reuses the same active objective without reinitializing state", async () => {
   const mock = makeMockContext({ auto_continue: false })
   const cleanup = await setupPlugin(mock as never)

@@ -3848,7 +3848,15 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         const { done, value } = await iterator.next()
         if (done) break
         const event = decodeV2Event(value)
-        if (event) await handleV2Event(event)
+        if (!event) continue
+        // Isolate each event: a rejected state call (unreadable state file,
+        // write error) must not end the subscription for the plugin's life.
+        try {
+          await handleV2Event(event)
+        } catch (error) {
+          if (disposed || abortController.signal.aborted) break
+          v2ErrorLog(`V2 event handling failed (${event.type})`, error)
+        }
       }
     } catch (error) {
       if (!abortController.signal.aborted) v2ErrorLog("V2 event consumer stopped", error)
