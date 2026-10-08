@@ -13,6 +13,8 @@
       "!!target",
       "!!build",
       "!!dist",
+      "!!.mcp.json",
+      "!!.cursor/mcp.json",
       "!!out",
       "!!coverage",
       "!!vendor",

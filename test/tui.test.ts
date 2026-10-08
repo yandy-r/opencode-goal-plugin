@@ -4,8 +4,14 @@ import { rename, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { testRender } from "@opentui/solid"
-import plugin, { formatDuration, formatGoal, goalStateFromSession, liveTimeUsedSeconds, readPersistedGoal } from "../src/tui.ts"
 import { messagesFor } from "../src/i18n"
+import plugin, {
+  formatDuration,
+  formatGoal,
+  goalStateFromSession,
+  liveTimeUsedSeconds,
+  readPersistedGoal,
+} from "../src/tui.ts"
 
 const previousStatePath = process.env.OPENCODE_GOAL_STATE_PATH
 const isolatedStateDir = mkdtempSync(join(tmpdir(), "goal-tui-v1-"))
@@ -35,7 +41,9 @@ afterAll(() => {
   rmSync(isolatedStateDir, { recursive: true, force: true })
 })
 
-function goal(overrides: Partial<Parameters<typeof liveTimeUsedSeconds>[0]> = {}): Parameters<typeof liveTimeUsedSeconds>[0] {
+function goal(
+  overrides: Partial<Parameters<typeof liveTimeUsedSeconds>[0]> = {},
+): Parameters<typeof liveTimeUsedSeconds>[0] {
   return {
     sessionID: "session",
     objective: "test goal",
@@ -75,7 +83,9 @@ test("tui plugin registers goal sidebar and status command without hijacking /go
   let sidebar: ((ctx: unknown, props: { session_id: string }) => unknown) | undefined
   const api = {
     slots: {
-      register(input: { slots: { sidebar_content: (ctx: unknown, props: { session_id: string }) => unknown } }) {
+      register(input: {
+        slots: { sidebar_content: (ctx: unknown, props: { session_id: string }) => unknown }
+      }) {
         sidebar = input.slots.sidebar_content
         return "slot-id"
       },
@@ -113,7 +123,9 @@ test("tui plugin registers goal sidebar and status command without hijacking /go
 
   const commands = registered?.() ?? []
   expect(commands.map((command) => command.value).sort()).toEqual(["goal.show"])
-  expect(commands.flatMap((command) => (command.slash ? [command.slash.name] : [])).sort()).toEqual([])
+  expect(commands.flatMap((command) => (command.slash ? [command.slash.name] : [])).sort()).toEqual(
+    [],
+  )
   expect(typeof sidebar?.({}, { session_id: "session" })).not.toBe("string")
 })
 
@@ -152,7 +164,10 @@ test("live goal time advances from the authoritative snapshot sample time", () =
 test("active goal sidebar advances visible elapsed time after a timer tick", async () => {
   const intervalCallbacks: (() => void)[] = []
   const timer = 1 as unknown as ReturnType<typeof setInterval>
-  const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((callback: unknown, delay?: number) => {
+  const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
+    callback: unknown,
+    delay?: number,
+  ) => {
     if (delay === 1000 && typeof callback === "function") {
       intervalCallbacks.push(() => callback())
       return timer
@@ -164,7 +179,9 @@ test("active goal sidebar advances visible elapsed time after a timer tick", asy
   const snapshot = goal()
   const api = {
     slots: {
-      register(input: { slots: { sidebar_content: (ctx: unknown, props: { session_id: string }) => unknown } }) {
+      register(input: {
+        slots: { sidebar_content: (ctx: unknown, props: { session_id: string }) => unknown }
+      }) {
         sidebar = input.slots.sidebar_content
         return "slot-id"
       },
@@ -197,7 +214,13 @@ test("active goal sidebar advances visible elapsed time after a timer tick", asy
         },
       },
       part() {
-        return [{ type: "tool", tool: "create_goal", state: { status: "completed", output: JSON.stringify({ goal: snapshot }) } }]
+        return [
+          {
+            type: "tool",
+            tool: "create_goal",
+            state: { status: "completed", output: JSON.stringify({ goal: snapshot }) },
+          },
+        ]
       },
     },
     kv: {
@@ -210,7 +233,10 @@ test("active goal sidebar advances visible elapsed time after a timer tick", asy
 
   setSystemTime(new Date(100_000))
   await plugin.tui(api as never, undefined, undefined as never)
-  const setup = await testRender(() => sidebar?.({}, { session_id: "session" }) as never, { width: 80, height: 20 })
+  const setup = await testRender(() => sidebar?.({}, { session_id: "session" }) as never, {
+    width: 80,
+    height: 20,
+  })
   let destroyed = false
   try {
     await setup.renderOnce()
@@ -237,7 +263,9 @@ test("V1 sidebar refreshes persisted counters without another goal tool result",
   const initial = goal({ objective: "live V1 goal" })
   const api = {
     slots: {
-      register(input: { slots: { sidebar_content: (ctx: unknown, props: { session_id: string }) => unknown } }) {
+      register(input: {
+        slots: { sidebar_content: (ctx: unknown, props: { session_id: string }) => unknown }
+      }) {
         sidebar = input.slots.sidebar_content
       },
     },
@@ -247,12 +275,25 @@ test("V1 sidebar refreshes persisted counters without another goal tool result",
     theme: { current: { text: "#ffffff", textMuted: "#888888", primary: "#00ff00" } },
     state: {
       session: { messages: () => [{ id: "created" }] },
-      part: () => [{ type: "tool", tool: "create_goal", state: { status: "completed", output: JSON.stringify({ goal: initial }) } }],
+      part: () => [
+        {
+          type: "tool",
+          tool: "create_goal",
+          state: { status: "completed", output: JSON.stringify({ goal: initial }) },
+        },
+      ],
     },
   }
-  await writeGoalState({ version: 2, goals: { session: { ...initial, lastAccountedAt: 100 } }, archives: {} })
+  await writeGoalState({
+    version: 2,
+    goals: { session: { ...initial, lastAccountedAt: 100 } },
+    archives: {},
+  })
   await plugin.tui(api as never, undefined, undefined as never)
-  const setup = await testRender(() => sidebar?.({}, { session_id: "session" }) as never, { width: 80, height: 20 })
+  const setup = await testRender(() => sidebar?.({}, { session_id: "session" }) as never, {
+    width: 80,
+    height: 20,
+  })
   try {
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("Tokens: 0")
@@ -264,12 +305,21 @@ test("V1 sidebar refreshes persisted counters without another goal tool result",
       lastCheckpoint: { summary: "build verified", timestamp: 101 },
       updatedAt: 101,
     })
-    await writeGoalState({ version: 2, goals: { session: { ...updated, lastAccountedAt: 101 } }, archives: {} })
+    await writeGoalState({
+      version: 2,
+      goals: { session: { ...updated, lastAccountedAt: 101 } },
+      archives: {},
+    })
     const deadline = Date.now() + 5000
     while (Date.now() < deadline) {
       await setup.flush()
       const frame = setup.captureCharFrame()
-      if (frame.includes("Tokens: 73") && frame.includes("Auto-continues: 3") && frame.includes("build verified")) break
+      if (
+        frame.includes("Tokens: 73") &&
+        frame.includes("Auto-continues: 3") &&
+        frame.includes("build verified")
+      )
+        break
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
     const frame = setup.captureCharFrame()
@@ -286,9 +336,16 @@ test("sidebar reader accepts V3 goals with plans while rejecting unknown future 
   await writeGoalState({ version: 3, goals: { session: stored }, archives: {} })
   expect(await readPersistedGoal("session")).toMatchObject({ objective: "test goal" })
   expect(await readPersistedGoal("missing")).toBeNull()
-  const planned = { ...stored, plan: { phases: [{ id: "parser", status: "in_progress" }] }, planRevision: 2 }
+  const planned = {
+    ...stored,
+    plan: { phases: [{ id: "parser", status: "in_progress" }] },
+    planRevision: 2,
+  }
   await writeGoalState({ version: 3, goals: { session: planned } })
-  expect(await readPersistedGoal("session")).toMatchObject({ objective: "test goal", planRevision: 2 })
+  expect(await readPersistedGoal("session")).toMatchObject({
+    objective: "test goal",
+    planRevision: 2,
+  })
   await writeGoalState({ version: 4, goals: { session: planned } })
   expect(await readPersistedGoal("session")).toBeUndefined()
 })
@@ -324,7 +381,11 @@ test("formats plugin-owned statuses and stop reasons for zh-CN presentation only
 test("keeps unknown last-status and blocker text verbatim in zh-CN presentation", () => {
   const userText = "Do not alter <user-authored status>"
   const blocker = "Keep this user blocker unchanged"
-  const formatted = formatGoal(goal({ lastStatus: userText, blocker }), messagesFor("zh-CN"), "zh-CN")
+  const formatted = formatGoal(
+    goal({ lastStatus: userText, blocker }),
+    messagesFor("zh-CN"),
+    "zh-CN",
+  )
   expect(formatted).toContain(`最近状态: ${userText}`)
   expect(formatted).toContain(`阻塞原因: ${blocker}`)
 })
@@ -388,7 +449,9 @@ test("restores the goal indicator from persistent tui cache when message history
     },
   }
 
-  expect(goalStateFromSession(api as never, "kv-cache-session").goal?.objective).toBe("persisted goal")
+  expect(goalStateFromSession(api as never, "kv-cache-session").goal?.objective).toBe(
+    "persisted goal",
+  )
 })
 
 test("clears the cached goal after clear_goal completes", () => {
@@ -419,10 +482,14 @@ test("clears the cached goal after clear_goal completes", () => {
     },
   }
 
-  expect(goalStateFromSession(api as never, "clear-cache-session").goal?.objective).toBe("goal to clear")
+  expect(goalStateFromSession(api as never, "clear-cache-session").goal?.objective).toBe(
+    "goal to clear",
+  )
 
   messages.push({ id: "cleared" })
-  partsByMessage.set("cleared", [{ type: "tool", tool: "clear_goal", state: { status: "completed", output: "" } }])
+  partsByMessage.set("cleared", [
+    { type: "tool", tool: "clear_goal", state: { status: "completed", output: "" } },
+  ])
 
   expect(goalStateFromSession(api as never, "clear-cache-session").goal).toBeNull()
 })

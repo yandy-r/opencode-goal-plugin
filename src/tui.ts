@@ -1,11 +1,17 @@
-import type { TuiCommand, TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
-import type { Plugin as TuiPluginV2 } from "@opencode/plugin/tui"
+import { readFile, stat } from "node:fs/promises"
 import type { SessionMessageInfo } from "@opencode/client"
+import type { Plugin as TuiPluginV2 } from "@opencode/plugin/tui"
+import type { TuiCommand, TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createElement, insert, setProp } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
-import { readFile, stat } from "node:fs/promises"
 import type { GoalMessages } from "./i18n"
-import { messagesFor, presentGoalLastStatus, presentGoalStatus, presentGoalStopReason, resolveLocale } from "./i18n"
+import {
+  messagesFor,
+  presentGoalLastStatus,
+  presentGoalStatus,
+  presentGoalStopReason,
+  resolveLocale,
+} from "./i18n"
 import { statePath } from "./state-path"
 
 type GoalCheckpoint = {
@@ -22,7 +28,14 @@ type GoalHistoryEntry = {
 type GoalSnapshot = {
   sessionID: string
   objective: string
-  status: "active" | "paused" | "budgetLimited" | "usageLimited" | "complete" | "unmet" | "cancelled"
+  status:
+    | "active"
+    | "paused"
+    | "budgetLimited"
+    | "usageLimited"
+    | "complete"
+    | "unmet"
+    | "cancelled"
   tokenBudget: number | null
   tokensUsed: number
   timeUsedSeconds: number
@@ -104,8 +117,10 @@ const GOAL_TOOL_NAMES: readonly string[] = [
 
 function element(tag: string, props: Record<string, unknown>, children: ElementChild[] = []) {
   const node = createElement(tag)
-  for (const [key, value] of Object.entries(props)) if (value !== undefined) setProp(node, key, value)
-  for (const child of children) if (child !== null && child !== undefined && child !== false) insert(node, child)
+  for (const [key, value] of Object.entries(props))
+    if (value !== undefined) setProp(node, key, value)
+  for (const child of children)
+    if (child !== null && child !== undefined && child !== false) insert(node, child)
   return node
 }
 
@@ -131,7 +146,11 @@ const noopDispose: SlotDispose = () => {}
  * the palette keymap layer both disappeared. Branch on the callback arity so
  * either host works, and tolerate hosts that return no disposer.
  */
-export function registerSlotV2(context: TuiPluginV2.Context, name: string, render: SlotRender): SlotDispose {
+export function registerSlotV2(
+  context: TuiPluginV2.Context,
+  name: string,
+  render: SlotRender,
+): SlotDispose {
   const slot = context.ui.slot as unknown as (...args: unknown[]) => unknown
   const dispose = slot.length <= 1 ? slot({ append: name, render }) : slot(name, render)
   return typeof dispose === "function" ? (dispose as SlotDispose) : noopDispose
@@ -156,7 +175,11 @@ export function themeColorV2(theme: unknown, ...paths: readonly (readonly string
       }
       cursor = (cursor as Record<string, unknown>)[key]
     }
-    if (cursor !== null && typeof cursor === "object" && "default" in (cursor as Record<string, unknown>)) {
+    if (
+      cursor !== null &&
+      typeof cursor === "object" &&
+      "default" in (cursor as Record<string, unknown>)
+    ) {
       cursor = (cursor as Record<string, unknown>).default
     }
     if (cursor !== undefined && cursor !== null) return cursor
@@ -168,7 +191,13 @@ function goalColorsV2(theme: unknown) {
   return {
     text: themeColorV2(theme, ["text", "default"], ["text"]),
     muted: themeColorV2(theme, ["text", "subdued"], ["textMuted"]),
-    achieved: themeColorV2(theme, ["text", "feedback", "success"], ["primary"], ["text", "default"], ["text"]),
+    achieved: themeColorV2(
+      theme,
+      ["text", "feedback", "success"],
+      ["primary"],
+      ["text", "default"],
+      ["text"],
+    ),
   }
 }
 
@@ -252,7 +281,9 @@ function actionOption(
     onSelect: () => {
       void sendGoalPrompt(api, sessionID, prompt)
         .then(() => api.ui.dialog.clear())
-        .catch((error) => toast(api, messages, error instanceof Error ? error.message : String(error), "error"))
+        .catch((error) =>
+          toast(api, messages, error instanceof Error ? error.message : String(error), "error"),
+        )
     },
   }
 }
@@ -299,7 +330,9 @@ function showSummary(
                 ),
               ]
             : []),
-          ...(goal.status === "paused" || goal.status === "budgetLimited" || goal.status === "usageLimited"
+          ...(goal.status === "paused" ||
+          goal.status === "budgetLimited" ||
+          goal.status === "usageLimited"
             ? [
                 actionOption(
                   api,
@@ -378,14 +411,30 @@ function isCheckpoint(value: unknown): value is GoalCheckpoint {
 }
 
 function isHistoryEntry(value: unknown): value is GoalHistoryEntry {
-  return isRecord(value) && typeof value.type === "string" && typeof value.detail === "string" && typeof value.timestamp === "number"
+  return (
+    isRecord(value) &&
+    typeof value.type === "string" &&
+    typeof value.detail === "string" &&
+    typeof value.timestamp === "number"
+  )
 }
 
 function isGoalSnapshot(value: unknown): value is GoalSnapshot {
   if (!isRecord(value)) return false
   if (typeof value.sessionID !== "string") return false
   if (typeof value.objective !== "string") return false
-  if (!["active", "paused", "budgetLimited", "usageLimited", "complete", "unmet", "cancelled"].includes(String(value.status))) return false
+  if (
+    ![
+      "active",
+      "paused",
+      "budgetLimited",
+      "usageLimited",
+      "complete",
+      "unmet",
+      "cancelled",
+    ].includes(String(value.status))
+  )
+    return false
   if (value.tokenBudget !== null && typeof value.tokenBudget !== "number") return false
   if (typeof value.tokensUsed !== "number") return false
   if (typeof value.timeUsedSeconds !== "number") return false
@@ -397,9 +446,12 @@ function isGoalSnapshot(value: unknown): value is GoalSnapshot {
   if (typeof value.continuationFailures !== "number") return false
   if (value.lastStatus != null && typeof value.lastStatus !== "string") return false
   if (value.maxAutoTurns !== null && typeof value.maxAutoTurns !== "number") return false
-  if (value.maxDurationSeconds !== null && typeof value.maxDurationSeconds !== "number") return false
-  if (value.noProgressTokenThreshold !== null && typeof value.noProgressTokenThreshold !== "number") return false
-  if (value.maxNoProgressTurns !== null && typeof value.maxNoProgressTurns !== "number") return false
+  if (value.maxDurationSeconds !== null && typeof value.maxDurationSeconds !== "number")
+    return false
+  if (value.noProgressTokenThreshold !== null && typeof value.noProgressTokenThreshold !== "number")
+    return false
+  if (value.maxNoProgressTurns !== null && typeof value.maxNoProgressTurns !== "number")
+    return false
   if (typeof value.noProgressTurns !== "number") return false
   if (typeof value.budgetWrapupSent !== "boolean") return false
   if (value.stopReason !== null && typeof value.stopReason !== "string") return false
@@ -416,27 +468,36 @@ function isGoalSnapshot(value: unknown): value is GoalSnapshot {
 }
 
 /** Read only the current session from the server's atomic state file. */
-export async function readPersistedGoal(sessionID: string): Promise<GoalSnapshot | null | undefined> {
+export async function readPersistedGoal(
+  sessionID: string,
+): Promise<GoalSnapshot | null | undefined> {
   try {
     const state: unknown = JSON.parse(await readFile(statePath(), "utf8"))
-    if (!isRecord(state) || (state.version !== 1 && state.version !== 2 && state.version !== 3) || !isRecord(state.goals)) return undefined
+    if (
+      !isRecord(state) ||
+      (state.version !== 1 && state.version !== 2 && state.version !== 3) ||
+      !isRecord(state.goals)
+    )
+      return undefined
     const stored = state.goals[sessionID]
     if (stored === undefined) return null
     if (!isRecord(stored) || stored.sessionID !== sessionID) return undefined
     const sampledAt = currentEpochSeconds()
     const timeUsedSeconds = typeof stored.timeUsedSeconds === "number" ? stored.timeUsedSeconds : 0
-    const activeSeconds = stored.status === "active" && typeof stored.lastAccountedAt === "number"
-      ? Math.max(0, sampledAt - stored.lastAccountedAt)
-      : 0
+    const activeSeconds =
+      stored.status === "active" && typeof stored.lastAccountedAt === "number"
+        ? Math.max(0, sampledAt - stored.lastAccountedAt)
+        : 0
     const tokenBudget = stored.tokenBudget
     const tokensUsed = stored.tokensUsed
     const snapshot = {
       ...stored,
       timeUsedSeconds: timeUsedSeconds + activeSeconds,
       sampledAt,
-      remainingTokens: typeof tokenBudget === "number" && typeof tokensUsed === "number"
-        ? Math.max(0, tokenBudget - tokensUsed)
-        : null,
+      remainingTokens:
+        typeof tokenBudget === "number" && typeof tokensUsed === "number"
+          ? Math.max(0, tokenBudget - tokensUsed)
+          : null,
     }
     return isGoalSnapshot(snapshot) ? snapshot : undefined
   } catch {
@@ -455,7 +516,13 @@ function usePersistedGoal(sessionID: string) {
     reading = true
     try {
       const file = await stat(statePath())
-      if (lastFile && lastFile.ino === file.ino && lastFile.mtimeMs === file.mtimeMs && lastFile.size === file.size) return
+      if (
+        lastFile &&
+        lastFile.ino === file.ino &&
+        lastFile.mtimeMs === file.mtimeMs &&
+        lastFile.size === file.size
+      )
+        return
       const next = await readPersistedGoal(sessionID)
       if (next === undefined) return
       lastFile = { ino: file.ino, mtimeMs: file.mtimeMs, size: file.size }
@@ -513,7 +580,11 @@ function goalFromSession(api: TuiPluginApi, sessionID: string) {
   return goalStateFromSession(api, sessionID).goal
 }
 
-export function formatGoal(goal: GoalSnapshot | null, messages: GoalMessages, locale: ReturnType<typeof resolveLocale>) {
+export function formatGoal(
+  goal: GoalSnapshot | null,
+  messages: GoalMessages,
+  locale: ReturnType<typeof resolveLocale>,
+) {
   if (!goal) return messages.tui.noGoal
   const lines = [
     `${messages.tui.objective}: ${goal.objective}`,
@@ -522,18 +593,31 @@ export function formatGoal(goal: GoalSnapshot | null, messages: GoalMessages, lo
     `${messages.tui.tokens}: ${goal.tokensUsed}${goal.tokenBudget == null ? "" : `/${goal.tokenBudget}`}`,
     `${messages.tui.autoContinues}: ${goal.autoTurns}${goal.maxAutoTurns == null ? "" : `/${goal.maxAutoTurns}`}`,
   ]
-  if (goal.remainingTokens != null) lines.push(`${messages.tui.tokensRemaining}: ${goal.remainingTokens}`)
-  if (goal.maxDurationSeconds != null) lines.push(`${messages.tui.durationLimit}: ${formatDuration(goal.maxDurationSeconds)}`)
-  if (goal.noProgressTurns > 0) lines.push(`${messages.tui.noProgressTurns}: ${goal.noProgressTurns}`)
-  if (goal.lastCheckpoint) lines.push(`${messages.tui.latestCheckpoint}: ${goal.lastCheckpoint.summary}`)
-  if (goal.stopReason) lines.push(`${messages.tui.stopReason}: ${presentGoalStopReason(goal.stopReason, locale)}`)
-  if (goal.lastStatus) lines.push(`${messages.tui.lastStatus}: ${presentGoalLastStatus(goal.lastStatus, locale)}`)
-  if (goal.completionEvidence) lines.push(`${messages.tui.completionEvidence}: ${goal.completionEvidence}`)
-  if (goal.blocker) lines.push(`${messages.tui.blocker}: ${presentGoalLastStatus(goal.blocker, locale)}`)
+  if (goal.remainingTokens != null)
+    lines.push(`${messages.tui.tokensRemaining}: ${goal.remainingTokens}`)
+  if (goal.maxDurationSeconds != null)
+    lines.push(`${messages.tui.durationLimit}: ${formatDuration(goal.maxDurationSeconds)}`)
+  if (goal.noProgressTurns > 0)
+    lines.push(`${messages.tui.noProgressTurns}: ${goal.noProgressTurns}`)
+  if (goal.lastCheckpoint)
+    lines.push(`${messages.tui.latestCheckpoint}: ${goal.lastCheckpoint.summary}`)
+  if (goal.stopReason)
+    lines.push(`${messages.tui.stopReason}: ${presentGoalStopReason(goal.stopReason, locale)}`)
+  if (goal.lastStatus)
+    lines.push(`${messages.tui.lastStatus}: ${presentGoalLastStatus(goal.lastStatus, locale)}`)
+  if (goal.completionEvidence)
+    lines.push(`${messages.tui.completionEvidence}: ${goal.completionEvidence}`)
+  if (goal.blocker)
+    lines.push(`${messages.tui.blocker}: ${presentGoalLastStatus(goal.blocker, locale)}`)
   return lines.join("\n")
 }
 
-function GoalSidebar(api: TuiPluginApi, messages: GoalMessages, locale: ReturnType<typeof resolveLocale>, sessionID: string) {
+function GoalSidebar(
+  api: TuiPluginApi,
+  messages: GoalMessages,
+  locale: ReturnType<typeof resolveLocale>,
+  sessionID: string,
+) {
   const theme = api.theme.current
   const state = goalStateFromSession(api, sessionID)
   if (!state.goal) return null
@@ -541,7 +625,12 @@ function GoalSidebar(api: TuiPluginApi, messages: GoalMessages, locale: ReturnTy
   const goal = createMemo(() => {
     const live = persisted()
     if (live === undefined) return state.goal
-    if (live && state.goal && (state.goal.createdAt > live.createdAt || state.goal.updatedAt > live.updatedAt)) return state.goal
+    if (
+      live &&
+      state.goal &&
+      (state.goal.createdAt > live.createdAt || state.goal.updatedAt > live.updatedAt)
+    )
+      return state.goal
     return live
   })
   const [nowSeconds, setNowSeconds] = createSignal(currentEpochSeconds())
@@ -551,35 +640,51 @@ function GoalSidebar(api: TuiPluginApi, messages: GoalMessages, locale: ReturnTy
     const timer = setInterval(() => setNowSeconds(currentEpochSeconds()), 1000)
     onCleanup(() => clearInterval(timer))
   })
-  return box({}, [() => {
-    const snapshot = goal()
-    if (!snapshot) return null
-    if (snapshot.status === "complete" || snapshot.status === "unmet") {
-      const elapsed = liveTimeUsedSeconds(snapshot)
-      return text({ fg: snapshot.status === "complete" ? theme.primary : theme.textMuted }, [
-        `${snapshot.status === "complete" ? messages.tui.achieved : messages.tui.unmet} (${formatDurationBadge(elapsed)})`,
+  return box({}, [
+    () => {
+      const snapshot = goal()
+      if (!snapshot) return null
+      if (snapshot.status === "complete" || snapshot.status === "unmet") {
+        const elapsed = liveTimeUsedSeconds(snapshot)
+        return text({ fg: snapshot.status === "complete" ? theme.primary : theme.textMuted }, [
+          `${snapshot.status === "complete" ? messages.tui.achieved : messages.tui.unmet} (${formatDurationBadge(elapsed)})`,
+        ])
+      }
+      return box({}, [
+        text({ fg: theme.text }, [messages.tui.title]),
+        text({ fg: theme.textMuted }, [
+          `${messages.tui.status}: ${presentGoalStatus(snapshot.status, locale)}`,
+        ]),
+        text({ fg: theme.textMuted }, [
+          `${messages.tui.time}: ${formatDuration(liveTimeUsedSeconds(snapshot, nowSeconds()))}`,
+        ]),
+        text({ fg: theme.textMuted }, [
+          `${messages.tui.tokens}: ${snapshot.tokensUsed}${snapshot.tokenBudget == null ? "" : `/${snapshot.tokenBudget}`}`,
+        ]),
+        text({ fg: theme.textMuted }, [
+          `${messages.tui.autoContinues}: ${snapshot.autoTurns}${snapshot.maxAutoTurns == null ? "" : `/${snapshot.maxAutoTurns}`}`,
+        ]),
+        ...(snapshot.lastCheckpoint
+          ? [
+              text({ fg: theme.textMuted }, [
+                `${messages.tui.checkpoint}: ${snapshot.lastCheckpoint.summary}`,
+              ]),
+            ]
+          : []),
+        ...(snapshot.stopReason
+          ? [
+              text({ fg: theme.textMuted }, [
+                `${messages.tui.stop}: ${presentGoalStopReason(snapshot.stopReason, locale)}`,
+              ]),
+            ]
+          : []),
+        ...(snapshot.lastStatus
+          ? [text({ fg: theme.textMuted }, [presentGoalLastStatus(snapshot.lastStatus, locale)])]
+          : []),
+        text({ fg: theme.textMuted }, [snapshot.objective]),
       ])
-    }
-    return box({}, [
-      text({ fg: theme.text }, [messages.tui.title]),
-      text({ fg: theme.textMuted }, [`${messages.tui.status}: ${presentGoalStatus(snapshot.status, locale)}`]),
-      text({ fg: theme.textMuted }, [`${messages.tui.time}: ${formatDuration(liveTimeUsedSeconds(snapshot, nowSeconds()))}`]),
-      text({ fg: theme.textMuted }, [
-        `${messages.tui.tokens}: ${snapshot.tokensUsed}${snapshot.tokenBudget == null ? "" : `/${snapshot.tokenBudget}`}`,
-      ]),
-      text({ fg: theme.textMuted }, [
-        `${messages.tui.autoContinues}: ${snapshot.autoTurns}${snapshot.maxAutoTurns == null ? "" : `/${snapshot.maxAutoTurns}`}`,
-      ]),
-      ...(snapshot.lastCheckpoint
-        ? [text({ fg: theme.textMuted }, [`${messages.tui.checkpoint}: ${snapshot.lastCheckpoint.summary}`])]
-        : []),
-      ...(snapshot.stopReason
-        ? [text({ fg: theme.textMuted }, [`${messages.tui.stop}: ${presentGoalStopReason(snapshot.stopReason, locale)}`])]
-        : []),
-      ...(snapshot.lastStatus ? [text({ fg: theme.textMuted }, [presentGoalLastStatus(snapshot.lastStatus, locale)])] : []),
-      text({ fg: theme.textMuted }, [snapshot.objective]),
-    ])
-  }])
+    },
+  ])
 }
 
 function registerGoalCommand(api: TuiPluginApi, command: TuiCommand) {
@@ -637,7 +742,9 @@ const tui: TuiPlugin = async (api, options) => {
  * `undefined` when no goal tool output is present (so callers can fall back to
  * a cached snapshot), `null` after a completed clear_goal, or the snapshot.
  */
-export function goalFromV2Messages(messages: readonly SessionMessageInfo[]): GoalSnapshot | null | undefined {
+export function goalFromV2Messages(
+  messages: readonly SessionMessageInfo[],
+): GoalSnapshot | null | undefined {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = messages[messageIndex]
     if (!message || message.type !== "assistant") continue
@@ -689,12 +796,30 @@ async function showSummaryV2(
     { title: messages.tui.refresh, value: "refresh", description: messages.tui.refreshDescription },
     ...(goal
       ? [
-          { title: messages.tui.history, value: "history", description: messages.tui.historyDescription },
+          {
+            title: messages.tui.history,
+            value: "history",
+            description: messages.tui.historyDescription,
+          },
           ...(goal.status === "active"
-            ? [{ title: messages.tui.pause, value: "pause", description: messages.tui.pauseDescription }]
+            ? [
+                {
+                  title: messages.tui.pause,
+                  value: "pause",
+                  description: messages.tui.pauseDescription,
+                },
+              ]
             : []),
-          ...(goal.status === "paused" || goal.status === "budgetLimited" || goal.status === "usageLimited"
-            ? [{ title: messages.tui.resume, value: "resume", description: messages.tui.resumeDescription }]
+          ...(goal.status === "paused" ||
+          goal.status === "budgetLimited" ||
+          goal.status === "usageLimited"
+            ? [
+                {
+                  title: messages.tui.resume,
+                  value: "resume",
+                  description: messages.tui.resumeDescription,
+                },
+              ]
             : []),
           { title: messages.tui.clear, value: "clear", description: messages.tui.clearDescription },
         ]
@@ -706,12 +831,18 @@ async function showSummaryV2(
     placeholder: formatGoal(goal, messages, locale),
     options,
   })
-  const prompt = selected === "refresh" ? refreshGoalPrompt(messages)
-    : selected === "history" ? historyGoalPrompt(messages)
-    : selected === "pause" ? pauseGoalPrompt(messages)
-    : selected === "resume" ? resumeGoalPrompt(messages)
-    : selected === "clear" ? clearGoalPrompt(messages)
-    : undefined
+  const prompt =
+    selected === "refresh"
+      ? refreshGoalPrompt(messages)
+      : selected === "history"
+        ? historyGoalPrompt(messages)
+        : selected === "pause"
+          ? pauseGoalPrompt(messages)
+          : selected === "resume"
+            ? resumeGoalPrompt(messages)
+            : selected === "clear"
+              ? clearGoalPrompt(messages)
+              : undefined
   if (!prompt) return
   try {
     await api.client.session.prompt({ sessionID, text: prompt })
@@ -727,9 +858,12 @@ function GoalSidebarV2(
   sessionID: string,
 ) {
   const colors = goalColorsV2(api.theme)
-  const [cache, setCache] = api.storage.memory<{ goal: GoalSnapshot | null }>(`goal-mode.v2.${sessionID}`, {
-    initial: { goal: null },
-  })
+  const [cache, setCache] = api.storage.memory<{ goal: GoalSnapshot | null }>(
+    `goal-mode.v2.${sessionID}`,
+    {
+      initial: { goal: null },
+    },
+  )
   const persisted = usePersistedGoal(sessionID)
   const messageGoal = createMemo(() => goalFromV2Messages(api.data.session.message.list(sessionID)))
   const goal = createMemo<GoalSnapshot | null>(() => {
@@ -737,7 +871,8 @@ function GoalSidebarV2(
     if (found === null) return null
     const live = persisted()
     if (live !== undefined) {
-      if (found && live && (found.createdAt > live.createdAt || found.updatedAt > live.updatedAt)) return found
+      if (found && live && (found.createdAt > live.createdAt || found.updatedAt > live.updatedAt))
+        return found
       return live
     }
     return found === undefined ? cache.goal : found
@@ -755,47 +890,60 @@ function GoalSidebarV2(
     const timer = setInterval(() => setNowSeconds(currentEpochSeconds()), 1000)
     onCleanup(() => clearInterval(timer))
   })
-  return box({}, [() => {
-    const snapshot = goal()
-    if (!snapshot) return null
-    if (snapshot.status === "complete" || snapshot.status === "unmet") {
-      const elapsed = liveTimeUsedSeconds(snapshot)
-      return text({ fg: snapshot.status === "complete" ? colors.achieved : colors.muted }, [
-        `${snapshot.status === "complete" ? messages.tui.achieved : messages.tui.unmet} (${formatDurationBadge(elapsed)})`,
+  return box({}, [
+    () => {
+      const snapshot = goal()
+      if (!snapshot) return null
+      if (snapshot.status === "complete" || snapshot.status === "unmet") {
+        const elapsed = liveTimeUsedSeconds(snapshot)
+        return text({ fg: snapshot.status === "complete" ? colors.achieved : colors.muted }, [
+          `${snapshot.status === "complete" ? messages.tui.achieved : messages.tui.unmet} (${formatDurationBadge(elapsed)})`,
+        ])
+      }
+      return box({}, [
+        text({ fg: colors.text }, [messages.tui.title]),
+        text({ fg: colors.muted }, [
+          `${messages.tui.status}: ${presentGoalStatus(snapshot.status, locale)}`,
+        ]),
+        text({ fg: colors.muted }, [
+          `${messages.tui.time}: ${formatDuration(liveTimeUsedSeconds(snapshot, nowSeconds()))}`,
+        ]),
+        text({ fg: colors.muted }, [
+          `${messages.tui.tokens}: ${snapshot.tokensUsed}${snapshot.tokenBudget == null ? "" : `/${snapshot.tokenBudget}`}`,
+        ]),
+        text({ fg: colors.muted }, [
+          `${messages.tui.autoContinues}: ${snapshot.autoTurns}${
+            snapshot.maxAutoTurns == null ? "" : `/${snapshot.maxAutoTurns}`
+          }`,
+        ]),
+        ...(snapshot.lastCheckpoint
+          ? [
+              text({ fg: colors.muted }, [
+                `${messages.tui.checkpoint}: ${snapshot.lastCheckpoint.summary}`,
+              ]),
+            ]
+          : []),
+        ...(snapshot.stopReason
+          ? [
+              text({ fg: colors.muted }, [
+                `${messages.tui.stop}: ${presentGoalStopReason(snapshot.stopReason, locale)}`,
+              ]),
+            ]
+          : []),
+        ...(snapshot.lastStatus
+          ? [text({ fg: colors.muted }, [presentGoalLastStatus(snapshot.lastStatus, locale)])]
+          : []),
+        text({ fg: colors.muted }, [snapshot.objective]),
       ])
-    }
-    return box({}, [
-      text({ fg: colors.text }, [messages.tui.title]),
-      text({ fg: colors.muted }, [`${messages.tui.status}: ${presentGoalStatus(snapshot.status, locale)}`]),
-      text({ fg: colors.muted }, [`${messages.tui.time}: ${formatDuration(liveTimeUsedSeconds(snapshot, nowSeconds()))}`]),
-      text({ fg: colors.muted }, [
-        `${messages.tui.tokens}: ${snapshot.tokensUsed}${snapshot.tokenBudget == null ? "" : `/${snapshot.tokenBudget}`}`,
-      ]),
-      text({ fg: colors.muted }, [
-        `${messages.tui.autoContinues}: ${snapshot.autoTurns}${
-          snapshot.maxAutoTurns == null ? "" : `/${snapshot.maxAutoTurns}`
-        }`,
-      ]),
-      ...(snapshot.lastCheckpoint
-        ? [text({ fg: colors.muted }, [`${messages.tui.checkpoint}: ${snapshot.lastCheckpoint.summary}`])]
-        : []),
-      ...(snapshot.stopReason
-        ? [
-            text(
-              { fg: colors.muted },
-              [`${messages.tui.stop}: ${presentGoalStopReason(snapshot.stopReason, locale)}`],
-            ),
-          ]
-        : []),
-      ...(snapshot.lastStatus
-        ? [text({ fg: colors.muted }, [presentGoalLastStatus(snapshot.lastStatus, locale)])]
-        : []),
-      text({ fg: colors.muted }, [snapshot.objective]),
-    ])
-  }])
+    },
+  ])
 }
 
-function GoalKeymapLayerV2(api: TuiPluginV2.Context, messages: GoalMessages, locale: ReturnType<typeof resolveLocale>) {
+function GoalKeymapLayerV2(
+  api: TuiPluginV2.Context,
+  messages: GoalMessages,
+  locale: ReturnType<typeof resolveLocale>,
+) {
   api.keymap.layer(() => ({
     mode: "global",
     commands: [
@@ -829,7 +977,9 @@ function GoalKeymapLayerV2(api: TuiPluginV2.Context, messages: GoalMessages, loc
  * needs to dispose the two `ui.slot` registrations.
  */
 export function setupTuiV2(context: TuiPluginV2.Context): TuiPluginV2.Cleanup {
-  const locale = resolveLocale(typeof context.options?.locale === "string" ? context.options.locale : undefined)
+  const locale = resolveLocale(
+    typeof context.options?.locale === "string" ? context.options.locale : undefined,
+  )
   const messages = messagesFor(locale)
   const offSidebar = registerSlotV2(context, "sidebar.content", (props) =>
     GoalSidebarV2(context, messages, locale, props.sessionID),

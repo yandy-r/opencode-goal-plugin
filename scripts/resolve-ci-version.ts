@@ -27,12 +27,17 @@ function bumpPatch(version: string) {
 }
 
 async function latestPublishedVersion(name: string) {
-  const encoded = name.startsWith("@") ? `@${encodeURIComponent(name.slice(1))}` : encodeURIComponent(name)
+  const encoded = name.startsWith("@")
+    ? `@${encodeURIComponent(name.slice(1))}`
+    : encodeURIComponent(name)
   const response = await fetch(`https://registry.npmjs.org/${encoded}`, {
     signal: AbortSignal.timeout(30_000),
   })
   if (response.status === 404) return null
-  if (!response.ok) throw new Error(`npm registry lookup failed for ${name}: ${response.status} ${response.statusText}`)
+  if (!response.ok)
+    throw new Error(
+      `npm registry lookup failed for ${name}: ${response.status} ${response.statusText}`,
+    )
 
   const data = (await response.json()) as { "dist-tags"?: { latest?: unknown } }
   const latest = data["dist-tags"]?.latest
@@ -49,4 +54,6 @@ if (next !== pkg.version) {
   await writeFile(packagePath, `${JSON.stringify(pkg, null, 2)}\n`)
 }
 
-console.log(`Publishing ${pkg.name}@${next}${latest ? ` (latest on npm: ${latest})` : " (first publish)"}`)
+console.log(
+  `Publishing ${pkg.name}@${next}${latest ? ` (latest on npm: ${latest})` : " (first publish)"}`,
+)

@@ -25,11 +25,11 @@ hook in `package.json` can run `lefthook install` automatically.
 
 ## What the hooks do
 
-| Stage        | Purpose                                            | When it fires                |
-| ------------ | -------------------------------------------------- | ---------------------------- |
-| `pre-commit` | Lint + format staged files (stack-specific)        | Before each `git commit`     |
-| `pre-push`   | Run the test suite (`bun run test`)                | Before each `git push`       |
-| `commit-msg` | Validate commit message against Conventional Commits via commitlint | On each `git commit` |
+| Stage        | Purpose                                                             | When it fires            |
+| ------------ | ------------------------------------------------------------------- | ------------------------ |
+| `pre-commit` | Lint + format staged files (stack-specific)                         | Before each `git commit` |
+| `pre-push`   | Run the test suite (`bun run test`)                                 | Before each `git push`   |
+| `commit-msg` | Validate commit message against Conventional Commits via commitlint | On each `git commit`     |
 
 Pre-commit commands receive `{staged_files}` from lefthook so they only touch
 files in the git index — fast, focused feedback. Files auto-fixed by the linter

@@ -6,10 +6,10 @@ Only the latest version published to npm receives security fixes. Releases are
 automated: every merge to `main` publishes a new patch version, so upgrading to
 the latest release always includes all shipped fixes.
 
-| Version | Supported |
-| --- | --- |
-| Latest npm release | ✅ |
-| Older releases | ❌ |
+| Version            | Supported |
+| ------------------ | --------- |
+| Latest npm release | ✅        |
+| Older releases     | ❌        |
 
 ## Reporting a Vulnerability
 

@@ -38,24 +38,24 @@ OpenCode plugin adding Codex-style long-running goal mode: a `/goal` command, go
 
 This project uses **Conventional Commits 1.0.0**. Every commit title must match:
 
-```
+```text
 <type>[optional scope]: <description>
 ```
 
 ### Types
 
-| Type | Purpose | Version bump |
-|------|---------|--------------|
-| `feat` | New user-facing feature | minor |
-| `fix` | User-facing bug fix | patch |
-| `docs` | Documentation only | — |
-| `refactor` | Code change that is neither fix nor feature | — |
-| `perf` | Performance improvement | — |
-| `test` | Adding or correcting tests | — |
-| `build` | Build system or external dependency changes | — |
-| `ci` | CI/CD configuration changes | — |
-| `chore` | Other non-user-facing changes | — |
-| `style` | Formatting/whitespace only | — |
+| Type       | Purpose                                     | Version bump |
+| ---------- | ------------------------------------------- | ------------ |
+| `feat`     | New user-facing feature                     | minor        |
+| `fix`      | User-facing bug fix                         | patch        |
+| `docs`     | Documentation only                          | —            |
+| `refactor` | Code change that is neither fix nor feature | —            |
+| `perf`     | Performance improvement                     | —            |
+| `test`     | Adding or correcting tests                  | —            |
+| `build`    | Build system or external dependency changes | —            |
+| `ci`       | CI/CD configuration changes                 | —            |
+| `chore`    | Other non-user-facing changes               | —            |
+| `style`    | Formatting/whitespace only                  | —            |
 
 ### Scope
 
@@ -68,7 +68,6 @@ Append `!` after the type/scope (`feat!: …`) **or** add a `BREAKING CHANGE: �
 ### Internal docs
 
 Use `docs(internal): …` for files under `docs/plans`, `docs/research`, or `docs/internal`. These stay out of release notes.
-
 
 ## Git Worktrees
 
@@ -101,11 +100,11 @@ After substantive changes, confirm the output matches expectations — do not re
 
 ## Stack Overview
 
-| Layer | Technology | Notes |
-|-------|-----------|-------|
-| Primary language | **TypeScript** | — |
-| Secondary languages | — | — |
-| Package manager | bun | — |
+| Layer               | Technology     | Notes |
+| ------------------- | -------------- | ----- |
+| Primary language    | **TypeScript** | —     |
+| Secondary languages | —              | —     |
+| Package manager     | bun            | —     |
 
 ## Commands
 

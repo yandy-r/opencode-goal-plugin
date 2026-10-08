@@ -12,7 +12,7 @@ PR titles are validated by
 [`.github/workflows/pr-title.yml`](workflows/pr-title.yml) and the check is
 required to merge. Use:
 
-```
+```text
 <type>[optional scope]: <description>
 ```
 
@@ -32,7 +32,7 @@ required to merge. Use:
 
 Edit the existing PR in place — **do not open a replacement PR**:
 
-```
+```text
 gh pr edit <number> --title "<new-title>"
 ```
 

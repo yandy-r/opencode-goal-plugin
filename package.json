@@ -36,14 +36,7 @@
       "import": "./src/tui.ts"
     }
   },
-  "files": [
-    "dist",
-    "src/tui.ts",
-    "src/i18n.ts",
-    "src/state-path.ts",
-    "LICENSE",
-    "README.md"
-  ],
+  "files": ["dist", "src/tui.ts", "src/i18n.ts", "src/state-path.ts", "LICENSE", "README.md"],
   "scripts": {
     "lint": "eslint .",
     "lint:modified": "./scripts/style.sh lint --modified",

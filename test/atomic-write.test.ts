@@ -1,17 +1,17 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
-import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { join } from "node:path"
+import type { AtomicWriteOps, DirHandleOps, DirOpenOps, FileHandleOps } from "../src/atomic-write"
 import {
-  RENAME_ATTEMPTS,
-  RENAME_RETRY_DELAY_MS,
   atomicWriteFile,
   defaultAtomicWriteOps,
   defaultDirOpenOps,
   defaultSleep,
+  RENAME_ATTEMPTS,
+  RENAME_RETRY_DELAY_MS,
   syncDirectory,
 } from "../src/atomic-write"
-import type { AtomicWriteOps, DirHandleOps, DirOpenOps, FileHandleOps } from "../src/atomic-write"
 
 let dir = ""
 let file = ""
@@ -51,7 +51,9 @@ type Event = { op: string; args: unknown[] }
  * unless a specific op/handle method is overridden. Every invocation (including
  * overridden ones) is recorded in order.
  */
-function makeRecordingOps(overrides: { ops?: Partial<AtomicWriteOps>; handle?: Partial<FileHandleOps> } = {}) {
+function makeRecordingOps(
+  overrides: { ops?: Partial<AtomicWriteOps>; handle?: Partial<FileHandleOps> } = {},
+) {
   const events: Event[] = []
   const record = (op: string, args: unknown[]) => events.push({ op, args })
 
@@ -85,11 +87,15 @@ function makeRecordingOps(overrides: { ops?: Partial<AtomicWriteOps>; handle?: P
     },
     rename(from, to) {
       record("rename", [from, to])
-      return overrides.ops?.rename ? overrides.ops.rename(from, to) : defaultAtomicWriteOps.rename(from, to)
+      return overrides.ops?.rename
+        ? overrides.ops.rename(from, to)
+        : defaultAtomicWriteOps.rename(from, to)
     },
     chmod(path, mode) {
       record("chmod", [path, mode])
-      return overrides.ops?.chmod ? overrides.ops.chmod(path, mode) : defaultAtomicWriteOps.chmod(path, mode)
+      return overrides.ops?.chmod
+        ? overrides.ops.chmod(path, mode)
+        : defaultAtomicWriteOps.chmod(path, mode)
     },
     unlink(path) {
       record("unlink", [path])
@@ -113,7 +119,8 @@ function makeRecordingOps(overrides: { ops?: Partial<AtomicWriteOps>; handle?: P
     if (!event) throw new Error(`expected an ${op} call, got ${opsCalled().join(", ")}`)
     return event.args
   }
-  const allArgsFor = (op: string) => events.filter((candidate) => candidate.op === op).map((candidate) => candidate.args)
+  const allArgsFor = (op: string) =>
+    events.filter((candidate) => candidate.op === op).map((candidate) => candidate.args)
   return { ops, events, opsCalled, argsFor, allArgsFor }
 }
 
@@ -307,7 +314,9 @@ test("a genuine directory-sync failure fails the write but keeps the renamed fil
     },
   })
 
-  await expect(atomicWriteFile(file, DATA, ops)).rejects.toThrow("disk error while flushing directory")
+  await expect(atomicWriteFile(file, DATA, ops)).rejects.toThrow(
+    "disk error while flushing directory",
+  )
 
   // The rename had already succeeded, so the final file holds the new content;
   // durability of the rename could not be established and that is reported
@@ -339,7 +348,9 @@ test("the default directory sync completes for an existing directory", async () 
 
 test("the default directory sync propagates genuine errors such as ENOENT", async () => {
   // A missing directory is a real problem, not "unsupported": it must surface.
-  await expect(defaultAtomicWriteOps.syncDir(join(dir, "does-not-exist"), process.platform)).rejects.toMatchObject({
+  await expect(
+    defaultAtomicWriteOps.syncDir(join(dir, "does-not-exist"), process.platform),
+  ).rejects.toMatchObject({
     code: "ENOENT",
   })
 })
