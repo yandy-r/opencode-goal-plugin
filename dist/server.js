@@ -343,7 +343,7 @@ function normalizeLocaleCandidate(value) {
   if (normalized === "zh" || normalized.startsWith("zh-"))
     return "zh-CN";
   if (normalized === "en" || normalized.startsWith("en-"))
-    return "en";
+    return "en-US";
   return null;
 }
 function processEnvironment() {
@@ -364,21 +364,21 @@ function systemLocale() {
 function resolveLocale(explicit, environment = processEnvironment(), osLocale = systemLocale()) {
   const configured = explicit?.trim();
   if (!configured)
-    return "en";
+    return "en-US";
   if (configured.toLowerCase() !== "auto")
-    return normalizeLocaleCandidate(configured) ?? "en";
+    return normalizeLocaleCandidate(configured) ?? "en-US";
   for (const candidate of [environment.LC_ALL, environment.LANG, osLocale]) {
     const locale = normalizeLocaleCandidate(candidate);
     if (locale)
       return locale;
   }
-  return "en";
+  return "en-US";
 }
 function messagesFor(locale) {
   return locale === "zh-CN" ? ZH_CN_MESSAGES : EN_MESSAGES;
 }
 var STATUS_PRESENTATIONS = {
-  en: {
+  "en-US": {
     active: "active",
     paused: "paused",
     budgetLimited: "budget limited",
@@ -477,7 +477,7 @@ function presentGoalLastStatus(status, locale) {
   return status;
 }
 var HISTORY_TYPE_PRESENTATIONS = {
-  en: {},
+  "en-US": {},
   "zh-CN": {
     created: "\u5DF2\u521B\u5EFA",
     updated: "\u5DF2\u66F4\u65B0",
@@ -647,7 +647,7 @@ function budgetLines(goal, locale) {
   ].join(`
 `);
 }
-function continuationPrompt(goal, locale = "en") {
+function continuationPrompt(goal, locale = "en-US") {
   if (locale === "zh-CN") {
     return `\u7EE7\u7EED\u63A8\u8FDB\u5F53\u524D\u4F1A\u8BDD\u7684\u6D3B\u52A8\u76EE\u6807\uFF0C\u5E76\u4F7F\u7528\u7B80\u4F53\u4E2D\u6587\u5411\u7528\u6237\u62A5\u544A\u72B6\u6001\u548C\u7ED3\u679C\u3002
 
@@ -675,7 +675,7 @@ ${PLAN_POLICY_EN}
 
 ${EVIDENCE_INSTRUCTIONS_EN}`;
 }
-function limitPrompt(goal, locale = "en") {
+function limitPrompt(goal, locale = "en-US") {
   if (locale === "zh-CN") {
     return `\u5F53\u524D\u4F1A\u8BDD\u7684\u6D3B\u52A8\u76EE\u6807\u5DF2\u8FBE\u5230\u5B89\u5168\u9650\u5236\u3002
 
@@ -709,7 +709,7 @@ Stop reason: ${goal.stopReason ?? "goal limit reached"}
 
 Do not start new substantive work for this goal. Do not call update_goal_status to resume it; only an explicit user resume command may continue the goal. Wrap up this turn soon: summarize useful progress, identify remaining work or blockers, and leave the user with a clear next step. Do not call update_goal unless the goal is actually complete.`;
 }
-function systemReminder(locale = "en") {
+function systemReminder(locale = "en-US") {
   if (locale === "zh-CN") {
     return `OpenCode \u76EE\u6807\u6A21\u5F0F\u7B56\u7565\uFF1A
 - \u53EA\u80FD\u901A\u8FC7\u76EE\u6807\u5DE5\u5177\u7BA1\u7406\u76EE\u6807\u3002
@@ -730,7 +730,7 @@ function systemReminder(locale = "en") {
 - In Plan mode or another restricted agent, do not perform implementation work, run state-changing commands, or resume a goal unless plugin configuration explicitly allows goal execution there.
 - ${PLAN_POLICY_EN}`;
 }
-function compactionContextPrefix(locale = "en") {
+function compactionContextPrefix(locale = "en-US") {
   return locale === "zh-CN" ? "OpenCode \u76EE\u6807\u6A21\u5F0F\u6B63\u5728\u8DE8\u4E0A\u4E0B\u6587\u538B\u7F29\u8DDF\u8E2A\u6B64\u4F1A\u8BDD\u76EE\u6807\u3002" : "OpenCode goal mode is tracking this session goal across compaction.";
 }
 var COMPACTION_CONTEXT_PREFIX = compactionContextPrefix();
@@ -792,7 +792,7 @@ function formatCompactionSnapshot(goal, locale) {
   return lines.join(`
 `);
 }
-function compactionContext(goal, locale = "en") {
+function compactionContext(goal, locale = "en-US") {
   if (locale === "zh-CN") {
     return `${compactionContextPrefix(locale)}
 
@@ -2197,7 +2197,7 @@ function restrictedAgentSet(options) {
   const names = Array.isArray(options?.restricted_agents) ? options.restricted_agents : DEFAULT_RESTRICTED_AGENTS;
   return new Set(names.map((name) => typeof name === "string" ? name.trim().toLowerCase() : "").filter(Boolean));
 }
-function goalCommandTemplate(commandName, locale = "en") {
+function goalCommandTemplate(commandName, locale = "en-US") {
   if (locale === "zh-CN") {
     return `OpenCode \u76EE\u6807\u6A21\u5F0F\u547D\u4EE4 "/${commandName}" \u5DF2\u8C03\u7528\u3002
 
@@ -2273,7 +2273,7 @@ Use the goal tools to handle this command:
 
 Create a goal only from these explicit command arguments. Do not infer a goal from unrelated session context. After create_goal succeeds or returns an existing matching goal, never call it again for this command; continue working from the returned goal state.`;
 }
-function goalStatusCommandTemplate(commandName, locale = "en") {
+function goalStatusCommandTemplate(commandName, locale = "en-US") {
   if (locale === "zh-CN") {
     if (commandName === "pause_goal") {
       return `OpenCode \u76EE\u6807\u6A21\u5F0F\u547D\u4EE4 "/pause_goal" \u5DF2\u8C03\u7528\u3002
@@ -2329,7 +2329,7 @@ function isExplicitResumePrompt(text, commandName, locale, messages) {
   const value = text.trim();
   return value === goalStatusCommandTemplate("resume_goal", locale) || value === goalCommandTemplate(commandName, locale).replace("$ARGUMENTS", "resume") || value === messages.tui.resumePrompt;
 }
-function goalCommandDefinitions(commandName, locale = "en") {
+function goalCommandDefinitions(commandName, locale = "en-US") {
   const messages = messagesFor(locale);
   return [
     {
@@ -2377,7 +2377,7 @@ function timeoutMillisecondsFromSeconds(value) {
     return null;
   return Math.min(Math.ceil(value * 1000), MAX_TIMER_DELAY_MS);
 }
-function registerDesktopCommands(config, commandName, locale = "en") {
+function registerDesktopCommands(config, commandName, locale = "en-US") {
   config.command ??= {};
   const commands = goalCommandDefinitions(commandName, locale);
   for (const command of commands) {
@@ -3067,7 +3067,7 @@ var GOAL_PLAN_TOOLS = new Set([
   "replace_goal",
   "clear_goal"
 ]);
-function getGoalToolResult(goal, messages = messagesFor("en")) {
+function getGoalToolResult(goal, messages = messagesFor("en-US")) {
   const result = { goal };
   if (goal?.status === "budgetLimited" || goal?.status === "usageLimited") {
     result.goal_mode_notice = messages.notices.limitedGoal;
