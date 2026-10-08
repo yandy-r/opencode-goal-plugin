@@ -189,8 +189,8 @@ Defaults:
 - `max_goal_duration_seconds`: unset by default; when set, new goals inherit this elapsed-time safety limit.
 - `no_progress_token_threshold`: `50`; output-token floor used to judge whether a goal continuation turn made progress.
 - `max_no_progress_turns`: `2`; consecutive low-progress goal continuation turns before pausing. Only turns produced by a reserved goal continuation count — ordinary low-output assistant messages (for example short tool-call-only turns from PTY or status checks) never increment this counter.
-- `locale`: `"en"` by default. Set `"zh-CN"` for Simplified Chinese, or `"auto"` to detect `LC_ALL`, then `LANG`, then
-  the OS/JavaScript runtime locale. Unsupported explicit locales fall back to English.
+- `locale`: `"en-US"` by default. Set `"zh-CN"` for Simplified Chinese, or `"auto"` to detect `LC_ALL`, then `LANG`, then
+  the OS/JavaScript runtime locale. Unsupported explicit locales fall back to US English (`en-US`).
 - `register_command`: `true`; registers `/goal`, `/pause_goal`, and `/resume_goal`.
 - `command_name`: `"goal"`; renames the main goal command only. The reserved names `pause_goal` and `resume_goal` fall back to `goal` so the standalone controls remain available.
 - `restricted_agents`: `["plan"]`; agents (matched case-insensitively) treated as planning-only for goal execution.

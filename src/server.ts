@@ -195,7 +195,7 @@ function restrictedAgentSet(options?: Options) {
   )
 }
 
-function goalCommandTemplate(commandName: string, locale: GoalLocale = "en") {
+function goalCommandTemplate(commandName: string, locale: GoalLocale = "en-US") {
   if (locale === "zh-CN") {
     return `OpenCode 目标模式命令 "/${commandName}" 已调用。
 
@@ -279,7 +279,7 @@ Create a goal only from these explicit command arguments. Do not infer a goal fr
 
 function goalStatusCommandTemplate(
   commandName: "pause_goal" | "resume_goal",
-  locale: GoalLocale = "en",
+  locale: GoalLocale = "en-US",
 ) {
   if (locale === "zh-CN") {
     if (commandName === "pause_goal") {
@@ -358,7 +358,7 @@ type GoalCommandDefinition = {
 
 function goalCommandDefinitions(
   commandName: string,
-  locale: GoalLocale = "en",
+  locale: GoalLocale = "en-US",
 ): GoalCommandDefinition[] {
   const messages = messagesFor(locale)
   return [
@@ -414,7 +414,7 @@ function timeoutMillisecondsFromSeconds(value: unknown) {
   return Math.min(Math.ceil(value * 1000), MAX_TIMER_DELAY_MS)
 }
 
-function registerDesktopCommands(config: Config, commandName: string, locale: GoalLocale = "en") {
+function registerDesktopCommands(config: Config, commandName: string, locale: GoalLocale = "en-US") {
   config.command ??= {}
   const commands = goalCommandDefinitions(commandName, locale)
   for (const command of commands) {
@@ -1270,7 +1270,7 @@ const GOAL_PLAN_TOOLS = new Set([
   "clear_goal",
 ])
 
-function getGoalToolResult(goal: GoalSnapshot | null, messages: GoalMessages = messagesFor("en")) {
+function getGoalToolResult(goal: GoalSnapshot | null, messages: GoalMessages = messagesFor("en-US")) {
   const result: { goal: GoalSnapshot | null; goal_mode_notice?: string } = { goal }
   if (goal?.status === "budgetLimited" || goal?.status === "usageLimited") {
     result.goal_mode_notice = messages.notices.limitedGoal

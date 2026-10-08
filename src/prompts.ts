@@ -117,7 +117,7 @@ function budgetLines(goal: GoalSnapshot, locale: GoalLocale) {
   ].join("\n")
 }
 
-export function continuationPrompt(goal: GoalSnapshot, locale: GoalLocale = "en") {
+export function continuationPrompt(goal: GoalSnapshot, locale: GoalLocale = "en-US") {
   if (locale === "zh-CN") {
     return `继续推进当前会话的活动目标，并使用简体中文向用户报告状态和结果。
 
@@ -146,7 +146,7 @@ ${PLAN_POLICY_EN}
 ${EVIDENCE_INSTRUCTIONS_EN}`
 }
 
-export function limitPrompt(goal: GoalSnapshot, locale: GoalLocale = "en") {
+export function limitPrompt(goal: GoalSnapshot, locale: GoalLocale = "en-US") {
   if (locale === "zh-CN") {
     return `当前会话的活动目标已达到安全限制。
 
@@ -181,7 +181,7 @@ Stop reason: ${goal.stopReason ?? "goal limit reached"}
 Do not start new substantive work for this goal. Do not call update_goal_status to resume it; only an explicit user resume command may continue the goal. Wrap up this turn soon: summarize useful progress, identify remaining work or blockers, and leave the user with a clear next step. Do not call update_goal unless the goal is actually complete.`
 }
 
-export function systemReminder(locale: GoalLocale = "en") {
+export function systemReminder(locale: GoalLocale = "en-US") {
   if (locale === "zh-CN") {
     return `OpenCode 目标模式策略：
 - 只能通过目标工具管理目标。
@@ -203,7 +203,7 @@ export function systemReminder(locale: GoalLocale = "en") {
 - ${PLAN_POLICY_EN}`
 }
 
-export function compactionContextPrefix(locale: GoalLocale = "en") {
+export function compactionContextPrefix(locale: GoalLocale = "en-US") {
   return locale === "zh-CN"
     ? "OpenCode 目标模式正在跨上下文压缩跟踪此会话目标。"
     : "OpenCode goal mode is tracking this session goal across compaction."
@@ -253,7 +253,7 @@ function formatCompactionSnapshot(goal: GoalSnapshot, locale: GoalLocale) {
   return lines.join("\n")
 }
 
-export function compactionContext(goal: GoalSnapshot, locale: GoalLocale = "en") {
+export function compactionContext(goal: GoalSnapshot, locale: GoalLocale = "en-US") {
   if (locale === "zh-CN") {
     return `${compactionContextPrefix(locale)}
 

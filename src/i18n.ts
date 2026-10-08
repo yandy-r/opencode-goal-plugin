@@ -1,4 +1,4 @@
-export type GoalLocale = "en" | "zh-CN"
+export type GoalLocale = "en-US" | "zh-CN"
 
 type LocaleEnvironment = {
   LC_ALL?: string
@@ -336,7 +336,7 @@ function normalizeLocaleCandidate(value: string | null | undefined): GoalLocale 
   const normalized = value.trim().replaceAll("_", "-").split(".")[0]!.split("@")[0]!.toLowerCase()
   if (normalized === "c" || normalized === "posix") return null
   if (normalized === "zh" || normalized.startsWith("zh-")) return "zh-CN"
-  if (normalized === "en" || normalized.startsWith("en-")) return "en"
+  if (normalized === "en" || normalized.startsWith("en-")) return "en-US"
   return null
 }
 
@@ -362,14 +362,14 @@ export function resolveLocale(
   osLocale: string | undefined = systemLocale(),
 ): GoalLocale {
   const configured = explicit?.trim()
-  if (!configured) return "en"
-  if (configured.toLowerCase() !== "auto") return normalizeLocaleCandidate(configured) ?? "en"
+  if (!configured) return "en-US"
+  if (configured.toLowerCase() !== "auto") return normalizeLocaleCandidate(configured) ?? "en-US"
 
   for (const candidate of [environment.LC_ALL, environment.LANG, osLocale]) {
     const locale = normalizeLocaleCandidate(candidate)
     if (locale) return locale
   }
-  return "en"
+  return "en-US"
 }
 
 export function messagesFor(locale: GoalLocale): GoalMessages {
@@ -377,7 +377,7 @@ export function messagesFor(locale: GoalLocale): GoalMessages {
 }
 
 const STATUS_PRESENTATIONS: Record<GoalLocale, Record<string, string>> = {
-  en: {
+  "en-US": {
     active: "active",
     paused: "paused",
     budgetLimited: "budget limited",
@@ -494,7 +494,7 @@ export function presentGoalLastStatus(status: string, locale: GoalLocale): strin
 }
 
 const HISTORY_TYPE_PRESENTATIONS: Record<GoalLocale, Record<string, string>> = {
-  en: {},
+  "en-US": {},
   "zh-CN": {
     created: "已创建",
     updated: "已更新",

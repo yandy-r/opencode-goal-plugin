@@ -9,12 +9,12 @@ import {
 
 test("explicit locale overrides environment and OS locale", () => {
   expect(resolveLocale("zh-CN", { LANG: "en_US.UTF-8" }, "en-US")).toBe("zh-CN")
-  expect(resolveLocale("en", { LC_ALL: "zh_CN.UTF-8" }, "zh-CN")).toBe("en")
+  expect(resolveLocale("en-US", { LC_ALL: "zh_CN.UTF-8" }, "zh-CN")).toBe("en-US")
 })
 
 test("default locale remains English regardless of environment", () => {
   expect(resolveLocale(undefined, { LC_ALL: "zh_CN.UTF-8", LANG: "zh_CN.UTF-8" }, "zh-CN")).toBe(
-    "en",
+    "en-US",
   )
 })
 
@@ -27,8 +27,8 @@ test("auto locale detection prefers LC_ALL, then LANG, then OS locale", () => {
 })
 
 test("unsupported explicit locales fall back to English", () => {
-  expect(resolveLocale("fr-FR", { LANG: "zh_CN.UTF-8" }, "zh-CN")).toBe("en")
-  expect(resolveLocale("auto", { LANG: "C.UTF-8" }, "en-US")).toBe("en")
+  expect(resolveLocale("fr-FR", { LANG: "zh_CN.UTF-8" }, "zh-CN")).toBe("en-US")
+  expect(resolveLocale("auto", { LANG: "C.UTF-8" }, "en-US")).toBe("en-US")
 })
 
 test("zh-CN messages localize user-facing goal strings without changing tool identifiers", () => {
