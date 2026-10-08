@@ -82,7 +82,7 @@ jobs:
           OPENCODE_SMOKE_ARTIFACTS_DIR: ${{ runner.temp }}/smoke-artifacts
       - name: Upload smoke artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: v2-smoke-artifacts
           path: ${{ runner.temp }}/smoke-artifacts
