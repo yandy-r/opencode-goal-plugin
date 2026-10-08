@@ -295,7 +295,7 @@ verify an exact published package in the isolated environment.
 
 ## Publishing
 
-Branching and release rules live in [`RELEASING.md`](RELEASING.md). This package is set up for npm Trusted Publishing from GitHub Actions. On every push to `main`, CI runs typecheck, lint, and unit tests in parallel. If they all pass, the publish job computes the next patch version from the latest version on npm, builds the package, and runs `npm publish`.
+Branching and release rules live in [`RELEASING.md`](RELEASING.md). This package is set up for npm Trusted Publishing from GitHub Actions. Releases are cut from tags: pushing a `vX.Y.Z` tag (matching `package.json`) runs typecheck, lint, tests, and the V2 smoke in parallel; if they pass, the publish job builds the package, runs `npm publish`, and creates the GitHub release. Merging to `main` publishes only a `dev` snapshot (`X.Y.Z-dev.N.sha` under the `dev` dist-tag, no git tag or GitHub release); `latest` changes only on a tag.
 
 Before the first automated publish, configure the package on npm:
 

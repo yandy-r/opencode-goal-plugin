@@ -48,9 +48,9 @@ bun run pack:dry-run
 
 #### Publishing Flow
 
-This repo publishes from GitHub Actions on pushes to `main`. The workflow computes the next patch version from npm, builds, publishes, and creates a GitHub release.
+This repo publishes from GitHub Actions when a maintainer pushes a `vX.Y.Z` tag that matches `package.json` (see `RELEASING.md`). The workflow runs the gates, builds, publishes to npm, and creates the GitHub release. Merging to `main` publishes only a `dev` dist-tag snapshot (no git tag or GitHub release); agents never tag.
 
-After pushing a release change, monitor the workflow with `gh run list --branch main` and `gh run watch <run-id> --exit-status`. Verify the release and package metadata after success:
+After pushing a tag, monitor the workflow with `gh run list --workflow publish.yml` and `gh run watch <run-id> --exit-status`. Verify the release and package metadata after success:
 
 ```bash
 npm view @yandy-r/opencode-goal-plugin version dependencies

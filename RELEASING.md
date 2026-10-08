@@ -66,18 +66,14 @@ release that flips them.
 ## Releasing
 
 Tags follow `vX.Y.Z`. Version files: `package.json`. Changelog:
-none yet (GitHub release notes). `.github/workflows/publish.yml` publishes to npm on every push to `main`: it computes the next patch version from npm, publishes, and creates the `vX.Y.Z` tag and GitHub release itself.
+none yet (GitHub release notes). `.github/workflows/publish.yml` publishes to npm when a `v*` tag is pushed (tag must equal `v` + the `package.json` version) and creates the GitHub release. A push to `main` publishes only a `dev` snapshot (`X.Y.Z-dev.N.sha` under the `dev` dist-tag, no git tag or release); `latest` never moves without a tag.
 
 ### Every release — from `main`
 
-Releases are automatic: every merge to `main` runs `.github/workflows/publish.yml`, which
-computes the next patch version from npm, publishes it, and tags and releases `vX.Y.Z`.
-
-1. Merge the PR into `main` (squash; the PR title is the commit subject).
-2. For a minor or major bump, raise `version` in `package.json` above the last published version before merging; `scripts/resolve-ci-version.ts` otherwise bumps the patch.
-3. Verify with `npm view @yandy-r/opencode-goal-plugin version` and `gh release view vX.Y.Z`.
-
-Agents never tag or publish by hand.
+1. On `main`, commit `chore(release): vX.Y.Z` with the changelog entry and the version
+   bump.
+2. Push an annotated tag `vX.Y.Z`.
+3. Publish the release notes.
 
 `/ycc:releaser` automates these steps and checks you are on the right branch.
 
