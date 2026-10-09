@@ -15,6 +15,9 @@ concurrency:
   group: npm-publish-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  OPENCODE_CLI_VERSION: "2.0.25"
+
 jobs:
   typecheck:
     name: Typecheck
@@ -56,10 +59,26 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - name: Install OpenCode V2
-        run: npm install -g @opencode/cli@beta
+        run: npm install -g @opencode/cli@${OPENCODE_CLI_VERSION}
+      - name: Assert OpenCode CLI version
+        id: cli-version
+        run: |
+          OBSERVED="$(opencode2 --version)"
+          test "$OBSERVED" = "opencode v${OPENCODE_CLI_VERSION}"
+          echo "version=${OBSERVED}" >> "$GITHUB_OUTPUT"
       - run: bun run smoke:v2
         env:
           OPENCODE_SMOKE_TIMEOUT_MS: "120000"
+          OPENCODE_SMOKE_ARTIFACTS_DIR: ${{ runner.temp }}/smoke-artifacts
+      - name: Upload smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: v2-smoke-artifacts
+          path: ${{ runner.temp }}/smoke-artifacts
+          if-no-files-found: ignore
+    outputs:
+      opencode_cli_version: ${{ steps.cli-version.outputs.version }}
 
   publish:
     name: Publish to npm
@@ -117,6 +136,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          OPENCODE_CLI_OBSERVED: ${{ needs.v2-smoke.outputs.opencode_cli_version }}
         run: |
           cat > release-notes.md <<EOF
           Published npm version: @yandy-r/opencode-goal-plugin@${VERSION}
@@ -125,7 +145,7 @@ jobs:
           - Typecheck passed.
           - Lint passed.
           - Unit tests passed.
-          - V2 lifecycle smoke passed against @opencode/cli@beta.
+          - V2 lifecycle smoke passed against ${OPENCODE_CLI_OBSERVED}.
           - Package published to npm.
           EOF
 

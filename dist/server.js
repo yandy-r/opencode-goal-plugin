@@ -3765,6 +3765,11 @@ function decodeV2Event(value) {
     return;
   return decoded;
 }
+function pushSystemOnce(system, text, alreadyPresent) {
+  if (system.some((part) => part.type === "text" && alreadyPresent(part.text)))
+    return;
+  system.push({ type: "text", text });
+}
 function textFromToolResult(result) {
   if (typeof result.output === "string")
     return result.output;
@@ -4994,11 +4999,8 @@ async function setupV2(context) {
       return inFlight;
     const resolution = (async () => {
       try {
-        const response = await context.session.get({ sessionID });
-        const record = response;
-        const info = record && typeof record === "object" && "data" in record ? record.data : response;
-        const location = info?.location;
-        const owned = locationRefMatches(location, context.location);
+        const info = await context.session.get({ sessionID });
+        const owned = locationRefMatches(info.location, context.location);
         sessionOwnership.set(sessionID, owned);
         return owned;
       } catch {
@@ -5360,7 +5362,7 @@ async function setupV2(context) {
         draft.add({
           name: command.name,
           description: command.description,
-          execute: async (input, execution) => {
+          execute: async (input) => {
             objectiveEdits.delete(input.sessionID);
             const edit = command.action === "goal" ? /^edit\s+([\s\S]+)$/i.exec(input.prompt.text.trim()) : null;
             const editedGoal = edit ? await getGoal(input.sessionID) : null;
@@ -5397,19 +5399,17 @@ async function setupV2(context) {
             const args = input.prompt.text.trim().toLowerCase();
             const controlOnly = /^(history|status|show|current|pause|stop|cancel|clear|off|reset|none|edit)(?:\s|$)/.test(args);
             const pursue = command.action === "resume" || command.action === "goal" && args !== "" && !controlOnly;
-            const signal = execution?.signal ? AbortSignal.any([abortController.signal, execution.signal]) : abortController.signal;
+            const signal = abortController.signal;
             let admitted = false;
-            const cancel = () => {
-              if (!pursue || disposed)
-                return;
-              goalServices.stopAutonomy?.(input.sessionID);
-            };
-            execution?.signal?.addEventListener("abort", cancel, { once: true });
+            let stopWaiting = () => {};
+            const aborted = new Promise((resolve) => {
+              if (signal.aborted)
+                return resolve();
+              stopWaiting = () => signal.removeEventListener("abort", onAbort);
+              const onAbort = () => resolve();
+              signal.addEventListener("abort", onAbort, { once: true });
+            });
             try {
-              if (execution?.signal?.aborted) {
-                cancel();
-                return;
-              }
               await context.session.prompt({
                 ...forwardedPrompt,
                 sessionID: input.sessionID,
@@ -5417,10 +5417,13 @@ async function setupV2(context) {
                 delivery: input.delivery
               });
               admitted = true;
-              if (pursue && typeof context.session.wait === "function") {
+              if (pursue) {
                 let pursuedGoalID;
                 do {
-                  await context.session.wait({ sessionID: input.sessionID }, { signal });
+                  await Promise.race([
+                    context.session.wait({ sessionID: input.sessionID }),
+                    aborted
+                  ]);
                   if (eventConsumerStopped)
                     throw new Error("goal event stream stopped");
                   const goal = await getGoal(input.sessionID);
@@ -5433,9 +5436,9 @@ async function setupV2(context) {
                 } while (!disposed && !signal.aborted);
               }
             } catch (error) {
-              if (!admitted && !disposed && !execution?.signal?.aborted)
+              if (!admitted && !disposed)
                 throw error;
-              if (!disposed && !execution?.signal?.aborted) {
+              if (!disposed) {
                 goalServices.stopAutonomy?.(input.sessionID);
                 v2ErrorLog("Goal command wait failed; autonomous continuation stopped", error);
                 try {
@@ -5446,7 +5449,7 @@ async function setupV2(context) {
                 }
               }
             } finally {
-              execution?.signal?.removeEventListener("abort", cancel);
+              stopWaiting();
             }
           }
         });
@@ -5479,18 +5482,6 @@ async function setupV2(context) {
       }
     }));
   }
-  try {
-    const hookInterrupt = context.session.hook;
-    registrations.push(await hookInterrupt("interrupt", async ({ sessionID }) => {
-      markSessionOwnership(sessionID, true);
-      goalServices.stopAutonomy?.(sessionID);
-      try {
-        await cancelActiveGoal(sessionID);
-      } catch (error) {
-        v2ErrorLog("Failed to persist explicit session cancellation", error);
-      }
-    }));
-  } catch {}
   registrations.push(await context.tool.transform((draft) => {
     for (const tool of goalToolsV2(goalServices))
       draft.add(tool);
@@ -5546,21 +5537,14 @@ async function setupV2(context) {
   }));
   registrations.push(await context.session.hook("context", (sessionContext) => {
     const reminder = systemReminder(locale);
-    if (sessionContext.system.some((part) => part.type === "text" && part.text.includes(reminder)))
-      return;
-    sessionContext.system.push({ type: "text", text: reminder });
+    pushSystemOnce(sessionContext.system, reminder, (text) => text.includes(reminder));
   }));
-  try {
-    const hookCompaction = context.session.hook;
-    registrations.push(await hookCompaction("compaction", async (event) => {
-      const goal = await getGoal(event.sessionID);
-      if (!goal)
-        return;
-      if (event.system.some((part) => part.type === "text" && part.text.startsWith(compactionContextPrefix(locale))))
-        return;
-      event.system.push({ type: "text", text: compactionContext(goal, locale) });
-    }));
-  } catch {}
+  registrations.push(await context.session.hook("compaction", async (event) => {
+    const goal = await getGoal(event.sessionID);
+    if (!goal)
+      return;
+    pushSystemOnce(event.system, compactionContext(goal, locale), (text) => text.startsWith(compactionContextPrefix(locale)));
+  }));
   async function recoverTrackedTasks() {
     for (const item of (await getAllGoals()).goals) {
       if (disposed)

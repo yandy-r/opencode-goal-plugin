@@ -4,18 +4,23 @@ import { rename, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { SessionMessageAssistantTool, SessionMessageInfo } from "@opencode/client"
-import { DEFAULT_THEME, type ResolvedTheme, resolveThemeDocument } from "@opencode/theme/tui"
+import { parseThemeDocument, type ResolvedTheme, resolveThemeDocument } from "@opencode/theme/tui"
+import { RGBA } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import { createStore, type Store } from "solid-js/store"
 import plugin, {
+  goalColorsV2,
   goalFromV2Messages,
   liveTimeUsedSeconds,
   readPersistedGoal,
   registerSlotV2,
   setupTuiV2,
-  themeColorV2,
 } from "../src/tui.ts"
+// Exact OpenCode v2.0.25 built-in theme: packages/tui/src/theme/assets/v2/opencode.json (MIT).
+import opencodeTheme from "./fixtures/opencode-theme-v2.0.25.json" with { type: "json" }
+
+const DEFAULT_THEME = parseThemeDocument(opencodeTheme, "opencode-v2.0.25")
 
 type GoalSnapshot = Parameters<typeof liveTimeUsedSeconds>[0]
 
@@ -389,22 +394,30 @@ test("registerSlotV2 tolerates hosts that do not return a disposer", () => {
   expect(() => dispose()).not.toThrow()
 })
 
-test("themeColorV2 resolves nested, grouped, and legacy flat theme colors", () => {
-  const nested = {
-    text: { default: "#ffffff", subdued: "#888888", feedback: { success: { default: "#00ff00" } } },
-  }
-  const flat = { text: "#eeeeee", textMuted: "#777777", primary: "#00cc00" }
+test.each(["dark", "light"] as const)(
+  "goalColorsV2 maps the %s default theme to RGBA leaves",
+  (mode) => {
+    const theme = resolveThemeDocument(DEFAULT_THEME, mode)
+    const colors = goalColorsV2(theme)
 
-  expect(themeColorV2(nested, ["text", "default"], ["text"])).toBe("#ffffff")
-  expect(themeColorV2(nested, ["text", "subdued"], ["textMuted"])).toBe("#888888")
-  // A color group resolves to its `default` leaf rather than the group object.
-  expect(themeColorV2(nested, ["text", "feedback", "success"], ["primary"])).toBe("#00ff00")
+    expect(colors).toEqual({
+      text: theme.text.base,
+      muted: theme.text.muted,
+      achieved: theme.text.feedback.success.base,
+      warning: theme.text.feedback.warning.base,
+      error: theme.text.feedback.error.base,
+      info: theme.text.feedback.info.base,
+    })
+    for (const color of Object.values(colors)) {
+      expect(color).toBeDefined()
+      expect(color).toBeInstanceOf(RGBA)
+    }
+  },
+)
 
-  expect(themeColorV2(flat, ["text", "default"], ["text"])).toBe("#eeeeee")
-  expect(themeColorV2(flat, ["text", "subdued"], ["textMuted"])).toBe("#777777")
-  expect(themeColorV2(flat, ["text", "feedback", "success"], ["primary"])).toBe("#00cc00")
-
-  expect(themeColorV2({}, ["text", "default"], ["text"])).toBeUndefined()
+test("goalColorsV2 rejects the handcrafted legacy theme shapes", () => {
+  const legacy = { text: "#eeeeee", textMuted: "#777777", primary: "#00cc00" }
+  expect(() => goalColorsV2(legacy as never)).toThrow()
 })
 
 test("V2 setup registers sidebar.content and app slots and cleanup disposes them", () => {
