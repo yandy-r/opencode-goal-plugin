@@ -29,6 +29,7 @@ import {
   getGoal,
   getGoalHistory,
   getGoalInternal,
+  getPendingWrapupSessions,
   markGoalUnmet,
   markPendingContinuationStarted,
   onStateRecovery,
@@ -4142,6 +4143,18 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   const taskRecoveryComplete = humanRecoverySessions.then(recoverTrackedTasks).catch((error) => {
     v2ErrorLog("Task recovery from transcript failed", error)
   })
+  // A restarted process may hold an unconfirmed final handoff with no future
+  // settlement event, so arm its stale-reservation wake at startup.
+  void taskRecoveryComplete
+    .then(async () => {
+      for (const sessionID of await getPendingWrapupSessions()) {
+        if (disposed) return
+        if (!(await ownsSession(sessionID))) continue
+        const wake = freshWrapupWakeDelayMs(await getGoalInternal(sessionID), maxPromptFailures)
+        if (wake != null) scheduleSettledContinuation(sessionID, wake)
+      }
+    })
+    .catch((error) => v2ErrorLog("Wrap-up recovery failed", error))
 
   // Restart recovery. Every active goal is gated before the first await so a
   // lifecycle event for a later session cannot slip past a pre-restart request.

@@ -978,6 +978,20 @@ export async function getActiveGoalSessions() {
     .map((goal) => ({ sessionID: goal.sessionID, id: goal.id }))
 }
 
+/** Uncapped limited goals whose admitted final handoff is still unconfirmed, for startup wake recovery. */
+export async function getPendingWrapupSessions() {
+  const state = await readState()
+  return Object.values(state.goals)
+    .filter(
+      (goal) =>
+        (goal.status === "budgetLimited" || goal.status === "usageLimited") &&
+        !goal.budgetWrapupSent &&
+        goal.pendingAttempt?.kind === "wrapup" &&
+        !goal.pendingAttempt.delivered,
+    )
+    .map((goal) => goal.sessionID)
+}
+
 export async function getAllGoals() {
   const state = await readState()
   const sorted = Object.values(state.goals).sort(

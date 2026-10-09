@@ -3014,6 +3014,8 @@ test("task deferral keeps polling a limited goal until its wrap-up is spent, the
   // one wrap-up. That is the only prompt a limited goal ever gets.
   childBlocks = false
   await waitForLong(() => calls.length === 1, 10_000)
+  // Admission bookkeeping finishes after the prompt call, not at reservation.
+  await waitForLong(async () => (await getGoal("ses_wrapup_block"))?.budgetWrapupSent === true)
   const spent = await requireTool(tools.get_goal, "get_goal").execute({}, context)
   expect(String(spent)).toContain('"budgetWrapupSent": true')
 

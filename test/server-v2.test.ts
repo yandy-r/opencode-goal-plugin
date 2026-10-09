@@ -378,14 +378,16 @@ test("V2 wrapup admission wakes a fresh restarted reservation when it becomes st
   const persisted = JSON.parse(await readFile(file, "utf8"))
   persisted.goals.ses_v2.pendingAttempt.reservedAt = Date.now() - 29_000
   await writeFile(file, JSON.stringify(persisted))
-  const mock = makeMockContext({ min_continue_interval_seconds: 0, max_prompt_failures: 2 })
+  const location = { directory: "/workspace/wrapup-restart" }
+  const mock = makeMockContext(
+    { min_continue_interval_seconds: 0, max_prompt_failures: 2 },
+    [],
+    {},
+    location,
+    { ses_v2: { location } },
+  )
   const cleanup = await setupPlugin(mock as never)
-  // Only one settlement event: replacement must be driven by the retained wake.
-  await mock.stream.push({
-    type: "session.execution.succeeded",
-    created: Date.now(),
-    data: { sessionID: "ses_v2" },
-  })
+  // No settlement event: startup itself must retain the stale-reservation wake.
   await waitFor(async () => (await getGoal("ses_v2"))?.budgetWrapupSent === true)
   expect(mock.promptCalls).toHaveLength(1)
   expect((await getGoal("ses_v2"))?.status).toBe("budgetLimited")

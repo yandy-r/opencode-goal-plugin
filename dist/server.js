@@ -995,6 +995,10 @@ async function getActiveGoalSessions() {
   const state = await readState();
   return Object.values(state.goals).filter((goal) => goal.status === "active").map((goal) => ({ sessionID: goal.sessionID, id: goal.id }));
 }
+async function getPendingWrapupSessions() {
+  const state = await readState();
+  return Object.values(state.goals).filter((goal) => (goal.status === "budgetLimited" || goal.status === "usageLimited") && !goal.budgetWrapupSent && goal.pendingAttempt?.kind === "wrapup" && !goal.pendingAttempt.delivered).map((goal) => goal.sessionID);
+}
 async function getAllGoals() {
   const state = await readState();
   const sorted = Object.values(state.goals).sort((left, right) => right.updatedAt - left.updatedAt || (left.sessionID < right.sessionID ? -1 : left.sessionID > right.sessionID ? 1 : 0));
@@ -5740,6 +5744,17 @@ async function setupV2(context) {
   const taskRecoveryComplete = humanRecoverySessions.then(recoverTrackedTasks).catch((error) => {
     v2ErrorLog("Task recovery from transcript failed", error);
   });
+  taskRecoveryComplete.then(async () => {
+    for (const sessionID of await getPendingWrapupSessions()) {
+      if (disposed)
+        return;
+      if (!await ownsSession(sessionID))
+        continue;
+      const wake = freshWrapupWakeDelayMs(await getGoalInternal(sessionID), maxPromptFailures);
+      if (wake != null)
+        scheduleSettledContinuation(sessionID, wake);
+    }
+  }).catch((error) => v2ErrorLog("Wrap-up recovery failed", error));
   const humanRelists = new Map;
   async function relistHumanWaits(sessionID) {
     if (!humanWaits.needsRecovery(sessionID) || disposed)
