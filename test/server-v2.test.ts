@@ -334,6 +334,134 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
+test("V2 wrapup admission retries a failed send without losing the limit", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0, max_prompt_failures: 2 })
+  let sentAtRetry: boolean | undefined
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    if (mock.promptCalls.length === 1) throw new Error("network connection reset")
+    sentAtRetry = (await getGoal("ses_v2"))?.budgetWrapupSent
+    return { id: "wrapup_admitted" }
+  }
+  const cleanup = await setupPlugin(mock as never)
+  await createGoal("ses_v2", "finish with a final handoff", 10)
+  await accountUsage("ses_v2", 20)
+  const reason = (await getGoal("ses_v2"))?.stopReason
+  await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+  await waitFor(async () => (await getGoal("ses_v2"))?.budgetWrapupSent === true)
+  expect(sentAtRetry).toBe(false)
+  expect(mock.promptCalls).toHaveLength(2)
+  expect(await getGoal("ses_v2")).toMatchObject({ status: "budgetLimited", stopReason: reason, continuationFailures: 0 })
+  await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(mock.promptCalls).toHaveLength(2)
+  await cleanup()
+})
+
+test("V2 wrapup admission wakes a fresh restarted reservation when it becomes stale", async () => {
+  await createGoal("ses_v2", "restart must retain the handoff wake", 10)
+  await accountUsage("ses_v2", 20)
+  await reserveContinuation("ses_v2", 25, 0, 2)
+  const file = process.env.OPENCODE_GOAL_STATE_PATH!
+  const persisted = JSON.parse(await readFile(file, "utf8"))
+  persisted.goals.ses_v2.pendingAttempt.reservedAt = Date.now() - 29_000
+  await writeFile(file, JSON.stringify(persisted))
+  const mock = makeMockContext({ min_continue_interval_seconds: 0, max_prompt_failures: 2 })
+  const cleanup = await setupPlugin(mock as never)
+  // Only one settlement event: replacement must be driven by the retained wake.
+  await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+  await waitFor(async () => (await getGoal("ses_v2"))?.budgetWrapupSent === true)
+  expect(mock.promptCalls).toHaveLength(1)
+  expect((await getGoal("ses_v2"))?.status).toBe("budgetLimited")
+  await cleanup()
+})
+
+test("V2 wrapup admission survives disposal after the host accepts it", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  let admit!: () => void
+  const admission = new Promise<void>((resolve) => { admit = resolve })
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    await admission
+    return { id: "wrapup_admitted_after_dispose" }
+  }
+  const cleanup = await setupPlugin(mock as never)
+  await createGoal("ses_v2", "accepted handoff cannot be refunded", 10)
+  await accountUsage("ses_v2", 20)
+  await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+  await waitFor(() => mock.promptCalls.length === 1)
+  await cleanup()
+  admit()
+  await waitFor(async () => (await getGoal("ses_v2"))?.budgetWrapupSent === true)
+  expect((await getGoal("ses_v2"))?.status).toBe("budgetLimited")
+  expect(await reserveContinuation("ses_v2", 25, 0)).toBeNull()
+})
+
+test("V2 wrapup admission non-transport rejections stop at their own cap", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0, max_prompt_failures: 2 })
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    throw new Error("agent not found")
+  }
+  const cleanup = await setupPlugin(mock as never)
+  await createGoal("ses_v2", "host rejection keeps the limited status", 10)
+  await accountUsage("ses_v2", 20)
+  for (let i = 0; i < 3; i++) {
+    await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+    if (i < 2) await waitFor(async () => (await getGoalInternal("ses_v2"))?.wrapupFailures === i + 1)
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(mock.promptCalls).toHaveLength(2)
+  expect(await getGoal("ses_v2")).toMatchObject({ status: "budgetLimited", budgetWrapupSent: false, continuationFailures: 0 })
+  await cleanup()
+})
+
+test("V2 wrapup admission exhaustion stays unsent and preserves the limit", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0, max_prompt_failures: 1 })
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    throw new Error("network connection reset")
+  }
+  const cleanup = await setupPlugin(mock as never)
+  await createGoal("ses_v2", "failed handoff must not pause the limit", 10)
+  await recordContinuationResult("ses_v2", "failure", 3)
+  await accountUsage("ses_v2", 20)
+  const reason = (await getGoal("ses_v2"))?.stopReason
+  await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.wrapupFailures === 1)
+  for (let i = 0; i < 3; i++) {
+    await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(mock.promptCalls).toHaveLength(1)
+  expect(await getGoal("ses_v2")).toMatchObject({ status: "budgetLimited", stopReason: reason, budgetWrapupSent: false, continuationFailures: 1 })
+  await cleanup()
+})
+
+test("V2 failed partial step does not bypass the prompt failure cap", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0, max_prompt_failures: 2 })
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "partial failed output is not transport recovery")
+  await mock.stream.push({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "ses_v2" } })
+  for (let i = 0; i < 2; i++) {
+    await waitFor(async () => mock.promptCalls.length === i + 1 && (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+    const attemptID = (await getGoalInternal("ses_v2"))?.pendingAttempt?.id
+    const assistantMessageID = `msg_partial_${i}`
+    await mock.stream.push({ type: "session.execution.started", created: Date.now(), data: { sessionID: "ses_v2" } })
+    await mock.stream.push({ type: "session.step.started", created: Date.now(), data: { sessionID: "ses_v2", assistantMessageID, agent: "build" } })
+    await mock.stream.push({ type: "session.text.delta", created: Date.now(), data: { sessionID: "ses_v2", assistantMessageID, delta: `Working on failed step ${i}` } })
+    await mock.stream.push({ type: "session.step.failed", created: Date.now(), data: { sessionID: "ses_v2", assistantMessageID, tokens: { input: 2, output: 3, reasoning: 0, cache: { read: 0, write: 0 } }, error: { type: "provider.internal", message: "network connection reset" } } })
+    expect((await getGoalInternal("ses_v2"))?.pendingAttempt?.id).toBe(attemptID)
+    expect((await getGoal("ses_v2"))?.continuationFailures).toBe(i)
+    await mock.stream.push({ type: "session.execution.failed", created: Date.now(), data: { sessionID: "ses_v2", error: { type: "provider.internal", message: "network connection reset" } } })
+    await waitFor(async () => (await getGoal("ses_v2"))?.continuationFailures === i + 1)
+  }
+  expect(await getGoal("ses_v2")).toMatchObject({ status: "paused", stopReason: "auto-continue failures", tokensUsed: 10 })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(mock.promptCalls).toHaveLength(2)
+  await cleanup()
+})
+
 test("default export exposes both V1 server and V2 setup", () => {
   expect(typeof plugin.server).toBe("function")
   expect(typeof plugin.setup).toBe("function")
@@ -2272,7 +2400,8 @@ test("V2 task deferral keeps re-arming a limited goal until its wrap-up is spent
     // the single wrap-up a limited goal is owed.
     mock.stream.push({ type: "session.deleted", created: 102, data: { sessionID: "child" } })
     await waitFor(() => mock.promptCalls.length === 1, 10_000)
-    expect((await getGoalInternal("ses_v2"))?.budgetWrapupSent).toBe(true)
+    // budgetWrapupSent is set once the prompt is admitted, not at reservation.
+    await waitFor(async () => (await getGoalInternal("ses_v2"))?.budgetWrapupSent === true)
 
     // The delivered wrap-up is still finishing its post-delivery bookkeeping, and
     // runAutoContinue refuses re-entry while a continuation is in flight. Without this
