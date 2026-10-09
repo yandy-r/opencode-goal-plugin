@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises"
 import type { SessionMessageInfo } from "@opencode/client"
 import type { Plugin as TuiPluginV2 } from "@opencode/plugin/tui"
+import type { ResolvedTheme } from "@opencode/theme/tui"
 import type { TuiCommand, TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createElement, insert, setProp } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
@@ -158,48 +159,15 @@ export function registerSlotV2(
   return typeof dispose === "function" ? (dispose as SlotDispose) : noopDispose
 }
 
-/**
- * Reads a theme color by trying each candidate path in order, descending into a
- * `default` leaf when the resolved node is a color group.
- *
- * Current previews expose a nested theme (`text.default`, `text.subdued`,
- * `text.feedback.success`), while earlier previews and the V1 TUI expose flat
- * keys (`text`, `textMuted`, `primary`). Passing a color *group* as `fg`
- * renders nothing useful, so resolve to a leaf before handing it to OpenTUI.
- */
-export function themeColorV2(theme: unknown, ...paths: readonly (readonly string[])[]): unknown {
-  for (const path of paths) {
-    let cursor: unknown = theme
-    for (const key of path) {
-      if (cursor === null || typeof cursor !== "object") {
-        cursor = undefined
-        break
-      }
-      cursor = (cursor as Record<string, unknown>)[key]
-    }
-    if (
-      cursor !== null &&
-      typeof cursor === "object" &&
-      "default" in (cursor as Record<string, unknown>)
-    ) {
-      cursor = (cursor as Record<string, unknown>).default
-    }
-    if (cursor !== undefined && cursor !== null) return cursor
-  }
-  return undefined
-}
-
-function goalColorsV2(theme: unknown) {
+/** Maps stable V2 theme tokens to foreground color leaves. */
+export function goalColorsV2(theme: ResolvedTheme) {
   return {
-    text: themeColorV2(theme, ["text", "default"], ["text"]),
-    muted: themeColorV2(theme, ["text", "subdued"], ["textMuted"]),
-    achieved: themeColorV2(
-      theme,
-      ["text", "feedback", "success"],
-      ["primary"],
-      ["text", "default"],
-      ["text"],
-    ),
+    text: theme.text.base,
+    muted: theme.text.muted,
+    achieved: theme.text.feedback.success.base,
+    warning: theme.text.feedback.warning.base,
+    error: theme.text.feedback.error.base,
+    info: theme.text.feedback.info.base,
   }
 }
 
