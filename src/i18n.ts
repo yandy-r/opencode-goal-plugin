@@ -458,6 +458,7 @@ export function presentGoalLastStatus(status: string, locale: GoalLocale): strin
     "Goal marked unmet.": "目标已标记为未达成。",
     "Goal cancelled.": "目标已取消。",
     "Goal cancelled because it was replaced.": "目标因被替换而取消。",
+    "Waiting for user input.": "等待用户输入。",
     "Auto-continue attempt canceled before delivery.": "自动继续尝试已在发送前取消。",
     "Auto-continue prompt sent.": "自动继续提示已发送。",
     "Auto-continue prompt failed repeatedly. Resume the goal to retry.":
@@ -483,6 +484,8 @@ export function presentGoalLastStatus(status: string, locale: GoalLocale): strin
 
   const reserved = /^Auto-continue (\d+) reserved\.$/.exec(status)
   if (reserved) return `已预留第 ${reserved[1]} 次自动继续。`
+  const approval = /^Awaiting approval: (.*)$/.exec(status)
+  if (approval) return `等待批准：${approval[1]}`
   const failed = /^Auto-continue failed (\d+) time\(s\)\.$/.exec(status)
   if (failed) return `自动继续已失败 ${failed[1]} 次。`
   const pausedAfterFailures = /^Paused after (\d+) auto-continue failure\(s\)\.$/.exec(status)

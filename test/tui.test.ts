@@ -159,6 +159,7 @@ test("live goal time advances from the authoritative snapshot sample time", () =
   expect(liveTimeUsedSeconds(goal({ status: "paused" }), 130)).toBe(10)
   expect(liveTimeUsedSeconds(goal({ status: "complete" }), 130)).toBe(10)
   expect(liveTimeUsedSeconds(goal({ sampledAt: undefined }), 130)).toBe(10)
+  expect(liveTimeUsedSeconds(goal({ elapsedPaused: true }), 130)).toBe(10)
 })
 
 test("active goal sidebar advances visible elapsed time after a timer tick", async () => {
@@ -348,6 +349,32 @@ test("sidebar reader accepts V3 goals with plans while rejecting unknown future 
   })
   await writeGoalState({ version: 4, goals: { session: planned } })
   expect(await readPersistedGoal("session")).toBeUndefined()
+})
+
+test("readPersistedGoal freezes the delta while elapsed is paused", async () => {
+  const base = goal({ timeUsedSeconds: 12 })
+  await writeGoalState({
+    version: 3,
+    goals: { session: { ...base, lastAccountedAt: 100, elapsedPaused: true } },
+    archives: {},
+  })
+  setSystemTime(new Date(120_000))
+  try {
+    expect(await readPersistedGoal("session")).toMatchObject({ timeUsedSeconds: 12 })
+  } finally {
+    setSystemTime()
+  }
+  await writeGoalState({
+    version: 3,
+    goals: { session: { ...base, lastAccountedAt: 100 } },
+    archives: {},
+  })
+  setSystemTime(new Date(120_000))
+  try {
+    expect(await readPersistedGoal("session")).toMatchObject({ timeUsedSeconds: 12 + 20 })
+  } finally {
+    setSystemTime()
+  }
 })
 
 test("formats goal durations for display", () => {

@@ -5,6 +5,7 @@ import type { Tool as ToolSchema } from "@opencode/schema/tool"
 import type { Config, Plugin } from "@opencode-ai/plugin"
 import { z } from "zod"
 import { GoalPlanInputSchema, goalPlanEntries } from "./goal-plan"
+import { HumanWaits } from "./human-wait"
 import type { GoalLocale, GoalMessages } from "./i18n"
 import { formatGoalHistoryPresentation, messagesFor, resolveLocale } from "./i18n"
 import {
@@ -23,6 +24,7 @@ import {
   completeGoal,
   createGoal,
   estimateTokensFromText,
+  getActiveGoalSessions,
   getAllGoals,
   getGoal,
   getGoalHistory,
@@ -49,6 +51,7 @@ import {
 } from "./state"
 
 type Options = {
+  pause_elapsed_while_waiting?: boolean
   auto_continue?: boolean
   defer_while_tasks_active?: boolean
   max_auto_turns?: number
@@ -1169,8 +1172,7 @@ class TaskTracker {
 async function recordAssistantMessage(
   sessionID: string,
   message:
-    | { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[]; time?: unknown }
-    | undefined,
+    { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[]; time?: unknown } | undefined,
   options: Options,
   evaluateContinuation = false,
 ) {
@@ -1180,7 +1182,7 @@ async function recordAssistantMessage(
   const text = textFromMessage(message)
   const progressed = Boolean(
     /[\p{L}\p{N}]/u.test(text) &&
-      (id !== (before?.lastAssistantMessageID ?? "") || text !== (before?.lastAssistantText ?? "")),
+    (id !== (before?.lastAssistantMessageID ?? "") || text !== (before?.lastAssistantText ?? "")),
   )
   const goal = await recordAssistantProgress(sessionID, {
     messageID: id,
@@ -1297,6 +1299,7 @@ type GoalServices = {
   maxObjectiveChars: number
   isPlanAgent: (agent: unknown) => boolean
   consumeAutoTurnReset: (sessionID: string) => boolean
+  syncHumanWait?: (sessionID: string) => Promise<void>
   initializeUsage?: (sessionID: string) => Promise<void>
   stopAutonomy?: (sessionID: string, mode?: "stop" | "replace") => void
   consumeObjectiveEdit?: (
@@ -1362,6 +1365,8 @@ async function createGoalFromTool(
   }
   await services.initializeUsage?.(context.sessionID)
   if (goal.status === "active") services.stopAutonomy?.(context.sessionID, "replace")
+  await services.syncHumanWait?.(context.sessionID)
+  goal = (await getGoal(context.sessionID)) ?? goal
   return JSON.stringify(
     planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal },
     null,
@@ -1404,6 +1409,7 @@ async function replaceGoalFromTool(
   })
   services.stopAutonomy?.(context.sessionID, "replace")
   await services.initializeUsage?.(context.sessionID)
+  await services.syncHumanWait?.(context.sessionID)
   return JSON.stringify(
     planningOnly
       ? { ...result, plan_mode_notice: services.messages.notices.planModeCreate }
@@ -1473,7 +1479,7 @@ async function updateGoalObjectiveFromTool(
   const requested = input.status ?? "active"
   const planningOnly = requested === "active" && services.isPlanAgent(context.agent)
   const edit = services.consumeObjectiveEdit?.(context.sessionID, input.objective)
-  const goal = await updateGoalObjective(
+  let goal = await updateGoalObjective(
     context.sessionID,
     edit?.objective ?? input.objective,
     planningOnly ? "paused" : requested,
@@ -1484,6 +1490,8 @@ async function updateGoalObjectiveFromTool(
       requestedPlanEdit: edit,
     },
   )
+  await services.syncHumanWait?.(context.sessionID)
+  goal = (await getGoal(context.sessionID)) ?? goal
   return JSON.stringify(
     planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal },
     null,
@@ -1534,12 +1542,14 @@ async function updateGoalStatusFromTool(
   if (input.status === "active" && services.isPlanAgent(context.agent)) {
     throw new Error(services.messages.notices.cannotResumeInPlan)
   }
-  const goal = await setGoalStatus(
+  let goal = await setGoalStatus(
     context.sessionID,
     input.status,
     typeof context.agent === "string" ? context.agent : null,
     { resetAutoTurnLimit },
   )
+  await services.syncHumanWait?.(context.sessionID)
+  goal = (await getGoal(context.sessionID)) ?? goal
   return JSON.stringify({ goal }, null, 2)
 }
 
@@ -1672,12 +1682,26 @@ const server: Plugin = async ({ client }, options?: Options) => {
   const planAgents = restrictedAgentSet(options)
   const isPlanAgent = (agent: unknown) =>
     typeof agent === "string" && planAgents.has(agent.trim().toLowerCase())
+  const humanWaits = new HumanWaits(
+    options?.pause_elapsed_while_waiting !== false,
+    (sessionID) => {
+      clearTurnWatchdog(sessionID)
+      cancelScheduledContinuation(sessionID)
+    },
+    (sessionID) => {
+      if (disposed || humanWaits.blocked(sessionID)) return
+      if (busySessions.has(sessionID)) armTurnWatchdog(sessionID)
+      else if (activeContinuations.has(sessionID)) restartAfterContinuation.add(sessionID)
+      else scheduleSettledContinuation(sessionID)
+    },
+  )
   const goalServices: GoalServices = {
     options: options ?? {},
     locale,
     messages,
     isPlanAgent,
     maxObjectiveChars: objectiveChars,
+    syncHumanWait: (sessionID) => humanWaits.resync(sessionID),
     consumeAutoTurnReset: (sessionID) => explicitResumeRequests.delete(sessionID),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID)
@@ -1739,7 +1763,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
   }
 
   function armTurnWatchdog(sessionID: string) {
-    if (maxTurnTimeMs == null) return
+    if (maxTurnTimeMs == null || humanWaits.blocked(sessionID)) return
     if (watchdogRescuedSessions.has(sessionID)) return
     clearTurnWatchdog(sessionID)
     const watchdog: TurnWatchdog = {
@@ -1752,11 +1776,16 @@ const server: Plugin = async ({ client }, options?: Options) => {
 
   async function runTurnWatchdog(sessionID: string, watchdog: TurnWatchdog) {
     const epoch = continuationEpochs.current(sessionID)
-    const isCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const waitRevision = humanWaits.revision(sessionID)
+    const lifecycleCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const isCurrent = () =>
+      lifecycleCurrent() &&
+      !humanWaits.blocked(sessionID) &&
+      waitRevision === humanWaits.revision(sessionID)
     let claimedContinuation = false
     let claimedGoalID: string | undefined
     try {
-      if (disposed) return
+      if (disposed || humanWaits.blocked(sessionID)) return
       if (
         turnWatchdogs.get(sessionID) !== watchdog ||
         !busySessions.has(sessionID) ||
@@ -1765,7 +1794,8 @@ const server: Plugin = async ({ client }, options?: Options) => {
         return
       const goal = await getGoal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
-      if (goal?.status !== "active" || isPlanAgent(goal.lastPromptAgent)) return
+      if (goal?.status !== "active" || goal.waitingForHuman || isPlanAgent(goal.lastPromptAgent))
+        return
       const latestAssistant = await fetchLatestAssistant(client, sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
       const latestTurnAgent = agentFromMessage(latestAssistant)
@@ -1789,11 +1819,13 @@ const server: Plugin = async ({ client }, options?: Options) => {
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
       if (
         current?.status !== "active" ||
+        current.waitingForHuman ||
         isPlanAgent(current.lastPromptAgent) ||
         activeContinuations.has(sessionID)
       )
         return
 
+      if (!isCurrent()) return
       turnWatchdogs.delete(sessionID)
       activeContinuations.add(sessionID)
       claimedContinuation = true
@@ -1811,13 +1843,13 @@ const server: Plugin = async ({ client }, options?: Options) => {
       // never arms the no-progress evaluation. The rescue delivers while the
       // session is already inside a busy episode, so the pending attempt is
       // marked started immediately, and this busy episode rescues only once.
-      if (!isCurrent()) return
+      if (!lifecycleCurrent()) return
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         armNoProgress: false,
         started: true,
         expectedGoalID: claimedGoalID,
       })
-      if (isCurrent() && delivered?.pendingAttempt?.delivered) {
+      if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered) {
         locallyDeliveredPendingSessions.add(sessionID)
         clearTurnWatchdog(sessionID)
       }
@@ -1869,7 +1901,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
     replace = false,
     purpose: ScheduledContinuation["purpose"] = "settle",
   ) {
-    if (disposed) return
+    if (disposed || humanWaits.blocked(sessionID)) return
     if (!replace && scheduledContinuations.has(sessionID)) return
     if (replace) cancelScheduledContinuation(sessionID)
     const scheduled = {} as ScheduledContinuation
@@ -1910,11 +1942,16 @@ const server: Plugin = async ({ client }, options?: Options) => {
     fromTaskDeferral = false,
     scheduled?: ScheduledContinuation,
   ) {
-    if (disposed) return
+    if (disposed || humanWaits.blocked(sessionID)) return
     if (busySessions.has(sessionID)) return
     if (activeContinuations.has(sessionID)) return
     const epoch = continuationEpochs.current(sessionID)
-    const isCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const waitRevision = humanWaits.revision(sessionID)
+    const lifecycleCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const isCurrent = () =>
+      lifecycleCurrent() &&
+      !humanWaits.blocked(sessionID) &&
+      waitRevision === humanWaits.revision(sessionID)
     activeContinuations.add(sessionID)
     // Anchor for bounded-retry scheduling, declared at function scope so the
     // catch block can use it. Initialized to "now" as a safe default.
@@ -1965,7 +2002,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
         cancelScheduledContinuation(sessionID)
       if (scheduled && scheduledContinuations.get(sessionID) !== scheduled) return
       const current = await getGoalInternal(sessionID)
-      if (!isCurrent() || !current) return
+      if (!isCurrent() || !current || current.waitingForHuman) return
       const latestTurnAgent = agentFromMessage(latestAssistant)
       if (isPlanAgent(current.lastPromptAgent) || isPlanAgent(latestTurnAgent)) {
         if (current.status === "active") await pauseGoalForPlanMode(sessionID)
@@ -2048,7 +2085,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
         goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale),
         goal.lastPromptAgent ?? latestTurnAgent ?? null,
       )
-      if (!isCurrent()) {
+      if (!lifecycleCurrent()) {
         // The goal was stopped/replaced or the plugin disposed in flight: roll the
         // reserved turn back instead of committing a continuation afterward.
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
@@ -2059,7 +2096,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
       })
-      if (isCurrent() && delivered?.pendingAttempt?.delivered)
+      if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID)
       if (!delivered?.pendingAttempt?.delivered) {
         // The attempt was not present at delivery time (e.g. disposed mid-send):
@@ -2127,6 +2164,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       scheduledContinuations.clear()
       for (const watchdog of turnWatchdogs.values()) clearTimeout(watchdog.timer)
       turnWatchdogs.clear()
+      humanWaits.clear()
       watchdogRescuedSessions.clear()
       locallyDeliveredPendingSessions.clear()
       nativeRetrySessions.clear()
@@ -2464,6 +2502,41 @@ const server: Plugin = async ({ client }, options?: Options) => {
     async event({ event }) {
       const sessionID = sessionIDFromEvent(event as never)
       const eventType = (event as { type?: string }).type
+      const properties = (event as { properties?: Record<string, unknown> }).properties ?? {}
+      if (
+        sessionID &&
+        eventType &&
+        [
+          "permission.updated",
+          "permission.asked",
+          "permission.replied",
+          "question.asked",
+          "question.replied",
+          "question.rejected",
+        ].includes(eventType)
+      ) {
+        const kind = eventType.startsWith("permission.") ? "permission" : "question"
+        const asking = eventType === "permission.updated" || eventType.endsWith(".asked")
+        const id = asking
+          ? (properties.id ?? properties.requestID)
+          : (properties.permissionID ?? properties.requestID ?? properties.id)
+        if (typeof id === "string" && id) {
+          if (asking)
+            await humanWaits.ask(
+              sessionID,
+              kind,
+              id,
+              typeof properties.permission === "string"
+                ? properties.permission
+                : typeof properties.action === "string"
+                  ? properties.action
+                  : "",
+            )
+          else if (eventType.endsWith(".replied") || eventType.endsWith(".rejected"))
+            await humanWaits.reply(sessionID, kind, id)
+        }
+        return
+      }
       if (sessionID && isUserAbortEvent(event as never)) {
         explicitResumeRequests.delete(sessionID)
         goalServices.stopAutonomy?.(sessionID)
@@ -2526,7 +2599,11 @@ const server: Plugin = async ({ client }, options?: Options) => {
         const errorMessage = transportErrorMessageFromEvent(props)
         if (errorMessage && isTransportError(errorMessage)) {
           const goal = await getGoalInternal(sessionID)
-          if (goal?.status === "active") {
+          if (
+            goal?.status === "active" &&
+            !goal.waitingForHuman &&
+            !humanWaits.blocked(sessionID)
+          ) {
             const attempt = pendingAttemptOf(goal)
             if (attempt != null) {
               // The pending attempt failed at the transport level: count one
@@ -2564,6 +2641,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       }
       if (sessionID && eventType === "session.deleted") {
         continuationEpochs.invalidate(sessionID)
+        humanWaits.delete(sessionID)
         explicitResumeRequests.delete(sessionID)
         busySessions.delete(sessionID)
         clearTurnWatchdog(sessionID)
@@ -2658,12 +2736,26 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   const latestStepBySession = new Map<string, V2StepRecord>()
   const stepTextBuffers = new Map<string, string>()
   const stepTokenSums = new Map<string, number>()
+  const humanWaits = new HumanWaits(
+    options?.pause_elapsed_while_waiting !== false,
+    (sessionID) => {
+      clearTurnWatchdog(sessionID)
+      cancelScheduledContinuation(sessionID)
+    },
+    (sessionID) => {
+      if (disposed || humanWaits.blocked(sessionID)) return
+      if (busySessions.has(sessionID)) armTurnWatchdog(sessionID)
+      else if (activeContinuationsV2.has(sessionID)) restartAfterContinuation.add(sessionID)
+      else scheduleSettledContinuation(sessionID)
+    },
+  )
   const goalServices: GoalServices = {
     options,
     locale,
     messages,
     maxObjectiveChars: objectiveChars,
     isPlanAgent,
+    syncHumanWait: (sessionID) => humanWaits.resync(sessionID),
     consumeAutoTurnReset: (sessionID) => explicitResumeRequests.delete(sessionID),
     consumeObjectiveEdit: (sessionID, objective) => {
       const edit = objectiveEdits.get(sessionID)
@@ -2732,7 +2824,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   }
 
   function armTurnWatchdog(sessionID: string) {
-    if (maxTurnTimeMs == null) return
+    if (maxTurnTimeMs == null || humanWaits.blocked(sessionID)) return
     if (watchdogRescuedSessions.has(sessionID)) return
     clearTurnWatchdog(sessionID)
     const watchdog: TurnWatchdog = {
@@ -2745,11 +2837,16 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
 
   async function runTurnWatchdog(sessionID: string, watchdog: TurnWatchdog) {
     const epoch = continuationEpochs.current(sessionID)
-    const isCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const waitRevision = humanWaits.revision(sessionID)
+    const lifecycleCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const isCurrent = () =>
+      lifecycleCurrent() &&
+      !humanWaits.blocked(sessionID) &&
+      waitRevision === humanWaits.revision(sessionID)
     let claimedContinuation = false
     let claimedGoalID: string | undefined
     try {
-      if (disposed) return
+      if (disposed || humanWaits.blocked(sessionID)) return
       await taskRecoveryComplete
       if (
         turnWatchdogs.get(sessionID) !== watchdog ||
@@ -2759,7 +2856,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         return
       const goal = await getGoal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
-      if (goal?.status !== "active" || isPlanAgent(goal.lastPromptAgent)) return
+      if (goal?.status !== "active" || goal.waitingForHuman || isPlanAgent(goal.lastPromptAgent))
+        return
       const latestStep = latestStepBySession.get(sessionID)
       if (isPlanAgent(latestStep?.agent)) return
       const taskStatus = taskBlockStatus(sessionID)
@@ -2769,11 +2867,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
       if (
         current?.status !== "active" ||
+        current.waitingForHuman ||
         isPlanAgent(current.lastPromptAgent) ||
         activeContinuationsV2.has(sessionID)
       )
         return
 
+      if (!isCurrent()) return
       turnWatchdogs.delete(sessionID)
       activeContinuationsV2.add(sessionID)
       claimedContinuation = true
@@ -2789,13 +2889,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       // pending-continuation window but never consumes an auto-turn or
       // no-progress budget (armNoProgress: false). The rescue delivers while
       // already busy, so the pending attempt is marked started immediately.
-      if (!isCurrent()) return
+      if (!lifecycleCurrent()) return
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         armNoProgress: false,
         started: true,
         expectedGoalID: claimedGoalID,
       })
-      if (isCurrent() && delivered?.pendingAttempt?.delivered) {
+      if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered) {
         locallyDeliveredPendingSessions.add(sessionID)
         clearTurnWatchdog(sessionID)
       }
@@ -2840,7 +2940,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     replace = false,
     purpose: ScheduledContinuation["purpose"] = "settle",
   ) {
-    if (disposed) return
+    if (disposed || humanWaits.blocked(sessionID)) return
     if (!replace && scheduledContinuations.has(sessionID)) return
     if (replace) cancelScheduledContinuation(sessionID)
     const scheduled = {} as ScheduledContinuation
@@ -2886,12 +2986,23 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     if (busySessions.has(sessionID)) return
     if (activeContinuationsV2.has(sessionID)) return
     const epoch = continuationEpochs.current(sessionID)
-    const isCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const waitRevision = humanWaits.revision(sessionID)
+    const lifecycleCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
+    const isCurrent = () =>
+      lifecycleCurrent() &&
+      !humanWaits.blocked(sessionID) &&
+      waitRevision === humanWaits.revision(sessionID)
     // Transcript recovery must settle before any continuation decision;
     // otherwise the first lifecycle event after a restart defers to a task
     // state that has not been rebuilt yet.
     await taskRecoveryComplete
+    if (humanWaits.blocked(sessionID)) {
+      humanWaits.deferWake(sessionID)
+      return
+    }
     if (!isCurrent() || stoppedExecutions.has(sessionID) || busySessions.has(sessionID)) return
+    // Detached settlements can both wait on recovery; claim synchronously.
+    if (activeContinuationsV2.has(sessionID)) return
     activeContinuationsV2.add(sessionID)
     let attemptReservedAt = Date.now()
     let attemptGoalID: string | undefined
@@ -2943,8 +3054,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, after)
         const progressed = Boolean(
           after &&
-            (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") ||
-              after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")),
+          (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") ||
+            after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")),
         )
         const queuedAfterProgress = scheduledContinuations.get(sessionID)
         if (progressed && queuedAfterProgress?.purpose !== "settle")
@@ -2952,7 +3063,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       }
       if (scheduled && scheduledContinuations.get(sessionID) !== scheduled) return
       const current = await getGoalInternal(sessionID)
-      if (!isCurrent() || !current) return
+      if (!isCurrent() || !current || current.waitingForHuman) return
       const latestTurnAgent = latestStep?.agent
       if (isPlanAgent(current.lastPromptAgent) || isPlanAgent(latestTurnAgent)) {
         if (current.status === "active") await pauseGoalForPlanMode(sessionID)
@@ -3044,7 +3155,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale),
         goal.lastPromptAgent ?? latestTurnAgent ?? null,
       )
-      if (!isCurrent()) {
+      if (!lifecycleCurrent()) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         return
       }
@@ -3054,7 +3165,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
       })
-      if (isCurrent() && delivered?.pendingAttempt?.delivered)
+      if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID)
       if (!delivered?.pendingAttempt?.delivered) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
@@ -3157,9 +3268,30 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     return resolution
   }
 
+  function continueAfterV2Event(sessionID: string) {
+    // Keep lifecycle mutations serial, but never hold the event stream across
+    // continuation preparation/delivery: native human asks must inhibit it.
+    void runAutoContinue(sessionID).catch((error) => {
+      v2ErrorLog("Auto-continue failed", error)
+    })
+  }
+
+  function retryHumanInventory(sessionID: string) {
+    void relistHumanWaits(sessionID).catch((error) => {
+      v2ErrorLog("Permission recovery failed", error)
+    })
+  }
+
   async function handleV2Event(event: V2EventLike) {
     const data = event.data
-    const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined
+    const form = event.type.startsWith("form.") && isRecord(data.form) ? data.form : undefined
+    const sessionID = form
+      ? typeof form.sessionID === "string"
+        ? form.sessionID
+        : undefined
+      : typeof data.sessionID === "string"
+        ? data.sessionID
+        : undefined
     // subscribe() is server-wide. Every loaded location has a plugin instance;
     // only the owner may account usage or send a goal prompt for this event.
     // Still observe foreign child lifecycles for cross-location Task deferral.
@@ -3222,6 +3354,34 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       return
     }
     switch (event.type) {
+      case "permission.asked":
+      case "form.created": {
+        await humanRecoverySessions
+        const id = form?.id ?? data.id
+        if (sessionID && typeof id === "string" && id)
+          await humanWaits.ask(
+            sessionID,
+            form ? "form" : "permission",
+            id,
+            typeof data.action === "string" ? data.action : "",
+          )
+        if (sessionID) retryHumanInventory(sessionID)
+        return
+      }
+      case "permission.replied":
+      case "form.replied":
+      case "form.cancelled": {
+        await humanRecoverySessions
+        const id = event.type === "permission.replied" ? data.requestID : (form?.id ?? data.id)
+        if (sessionID && typeof id === "string" && id)
+          await humanWaits.reply(
+            sessionID,
+            event.type === "permission.replied" ? "permission" : "form",
+            id,
+          )
+        if (sessionID) retryHumanInventory(sessionID)
+        return
+      }
       case "session.created": {
         const parentID = data.parentID
         if (sessionID && typeof parentID === "string") {
@@ -3264,7 +3424,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
             // resolved on idle (no-response failures count exactly once, the
             // same as V1).
             const goal = await getGoalInternal(sessionID)
-            if (autoContinue || goal?.pendingAttempt != null) await runAutoContinue(sessionID)
+            if (autoContinue || goal?.pendingAttempt != null) continueAfterV2Event(sessionID)
           }
         }
         return
@@ -3286,7 +3446,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           // Resolution of a pending attempt runs even when auto-continue is
           // disabled (see the session.status idle branch above).
           const goal = await getGoalInternal(sessionID)
-          if (autoContinue || goal?.pendingAttempt != null) await runAutoContinue(sessionID)
+          if (autoContinue || goal?.pendingAttempt != null) continueAfterV2Event(sessionID)
         }
         return
       }
@@ -3322,7 +3482,11 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         taskTracker.observeSessionStatus(sessionID, "idle")
         if (errorMessage && isTransportError(errorMessage)) {
           const goal = await getGoalInternal(sessionID)
-          if (goal?.status === "active") {
+          if (
+            goal?.status === "active" &&
+            !goal.waitingForHuman &&
+            !humanWaits.blocked(sessionID)
+          ) {
             const attempt = pendingAttemptOf(goal)
             if (attempt != null) {
               const afterFailure = await recordContinuationResult(
@@ -3360,6 +3524,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       case "session.deleted": {
         if (!sessionID) return
         continuationEpochs.invalidate(sessionID)
+        humanWaits.delete(sessionID)
         explicitResumeRequests.delete(sessionID)
         stoppedExecutions.delete(sessionID)
         sessionOwnership.delete(sessionID)
@@ -3833,16 +3998,78 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   }
   // The catch guarantees this promise never rejects: the per-item try/catch
   // inside recoverTrackedTasks does not cover a getAllGoals() rejection.
-  const taskRecoveryComplete = recoverTrackedTasks().catch((error) => {
+  // Install every recovery marker before transcript recovery can release a
+  // startup continuation/watchdog. Subscription consumption stays independent
+  // of permission.list so live replies can race a slow list safely.
+  const humanRecoverySessions = getActiveGoalSessions().then(
+    (sessions) => {
+      if (!disposed) for (const item of sessions) humanWaits.beginRecovery(item.sessionID, item.id)
+      return sessions
+    },
+    (error) => {
+      v2ErrorLog("Permission recovery failed", error)
+      return []
+    },
+  )
+  const taskRecoveryComplete = humanRecoverySessions.then(recoverTrackedTasks).catch((error) => {
     v2ErrorLog("Task recovery from transcript failed", error)
   })
 
+  // Restart recovery. Every active goal is gated before the first await so a
+  // lifecycle event for a later session cannot slip past a pre-restart request.
+  // ponytail: forms have no plugin list API, so a form pending across restart
+  // is only gated again when a new form/permission event arrives.
+  const humanRelists = new Map<string, number>()
+  async function relistHumanWaits(sessionID: string) {
+    if (!humanWaits.needsRecovery(sessionID) || disposed) return
+    if (Date.now() < (humanRelists.get(sessionID) ?? 0)) return
+    humanRelists.set(sessionID, Date.now() + 1_000)
+    const goal = await getGoalInternal(sessionID)
+    if (!goal || isClosedGoal(goal) || disposed) return
+    humanWaits.beginRecovery(sessionID, goal.id)
+    await recoverSessionHumanWaits(sessionID)
+  }
+
+  async function recoverSessionHumanWaits(sessionID: string) {
+    let requests: Array<{ id: string; action?: string }> | null = null
+    for (let attempt = 0; attempt < 3 && requests === null && !disposed; attempt += 1) {
+      try {
+        const listed = await context.permission.list({ sessionID })
+        requests = listed.map((request) => ({ id: request.id, action: request.action }))
+      } catch (error) {
+        v2ErrorLog("Permission recovery failed", error)
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)))
+      }
+    }
+    if (disposed) return
+    await humanWaits.finishRecovery(sessionID, requests)
+  }
+
+  async function recoverHumanWaits() {
+    const sessions = await humanRecoverySessions
+    if (disposed) return
+    for (const { sessionID } of sessions) {
+      if (disposed) return
+      if (!(await ownsSession(sessionID))) {
+        humanWaits.abandonRecovery(sessionID)
+        continue
+      }
+      try {
+        await recoverSessionHumanWaits(sessionID)
+      } catch (error) {
+        v2ErrorLog("Permission recovery failed", error)
+      }
+    }
+  }
   const abortController = new AbortController()
   let eventIterator: AsyncIterator<unknown> | undefined
   const consumer = (async () => {
     const subscription = context.event.subscribe({ signal: abortController.signal })
     const iterator = subscription[Symbol.asyncIterator]()
     eventIterator = iterator
+    void recoverHumanWaits().catch((error) => {
+      v2ErrorLog("Permission recovery failed", error)
+    })
     try {
       while (true) {
         const { done, value } = await iterator.next()
@@ -3877,6 +4104,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     nativeRetrySessions.clear()
     locallyDeliveredPendingSessions.clear()
     watchdogRescuedSessions.clear()
+    humanWaits.clear()
     toolAttempts.clear()
     explicitResumeRequests.clear()
     objectiveEdits.clear()

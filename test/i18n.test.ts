@@ -52,6 +52,8 @@ test("zh-CN presents every plugin-owned last-status shape and preserves unknown 
       "检测到低进展的继续轮次（1/不限）。",
     ],
     ["token budget reached (12/10); wrap-up required.", "已达到 Token 预算（12/10）；需要收尾。"],
+    ["Awaiting approval: deploy the release", "等待批准：deploy the release"],
+    ["Waiting for user input.", "等待用户输入。"],
   ] as const
   for (const [source, expected] of cases)
     expect(presentGoalLastStatus(source, "zh-CN")).toBe(expected)

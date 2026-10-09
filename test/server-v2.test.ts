@@ -138,6 +138,9 @@ type MockContext = {
       sessionID: string
     }) => Promise<{ data?: { location?: { directory: string; workspaceID?: string | null } } }>
   }
+  permission: {
+    list: (input: { sessionID: string }) => Promise<Array<{ id: string; action?: string }>>
+  }
   event: {
     subscribe: (options?: { signal?: AbortSignal }) => AsyncIterable<unknown>
   }
@@ -213,6 +216,7 @@ function makeMockContext(
         return { data: sessionInfos[input.sessionID] }
       },
     },
+    permission: { list: async () => [] },
     event: {
       subscribe: () => stream,
     },
@@ -1800,7 +1804,7 @@ test("V2 global execution events only continue goals in the plugin instance loca
     location,
     data: { sessionID: "ses_v2" },
   })
-  expect(mock.promptCalls).toHaveLength(1)
+  await waitFor(() => mock.promptCalls.length === 1)
   mock.stream.end()
   await cleanup()
 })
@@ -1940,7 +1944,8 @@ test("V2 fast execution success schedules the next continuation after the minimu
     created: Date.now(),
     data: { sessionID: "ses_v2" },
   })
-  expect(mock.promptCalls).toHaveLength(1)
+  await waitFor(() => mock.promptCalls.length === 1)
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
   const first = (await getGoal("ses_v2"))!.lastContinuationAt!
   mock.stream.push({
     type: "session.execution.started",
@@ -3334,4 +3339,404 @@ test("V2 a command transport abort preserves the active goal for reconnection", 
   controller.abort()
   await command
   expect((await getGoal("ses_v2"))?.status).toBe("active")
+})
+
+async function humanEvent(mock: MockContext, type: string, data: Record<string, unknown>) {
+  await mock.stream.push({ type, created: Date.now(), data })
+}
+
+test("V2 human wait blocks watchdog and rearms a fresh busy window after final reply", async () => {
+  const mock = makeMockContext({ max_turn_time: 1, min_continue_interval_seconds: 0 })
+  await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "Await approval without rescue")
+  await humanEvent(mock, "session.execution.started", { sessionID: "ses_v2" })
+  await humanEvent(mock, "permission.asked", { sessionID: "ses_v2", id: "p1", action: "shell" })
+  expect(await getGoal("ses_v2")).toMatchObject({
+    waitingForHuman: true,
+    elapsedPaused: true,
+    lastStatus: "Awaiting approval: shell",
+  })
+  await new Promise((resolve) => setTimeout(resolve, 1100))
+  expect(mock.promptCalls).toHaveLength(0)
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "p1" })
+  expect(await getGoal("ses_v2")).toMatchObject({ waitingForHuman: false, elapsedPaused: false })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(mock.promptCalls).toHaveLength(0)
+  await waitFor(() => mock.promptCalls.length === 1, 2000)
+})
+
+test("V2 mixed human requests dedupe and suppress idle, failure and no-progress evaluation", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0, max_no_progress_turns: 1 })
+  await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "Wait on all human requests")
+  await humanEvent(mock, "session.execution.succeeded", { sessionID: "ses_v2" })
+  await waitFor(() => mock.promptCalls.length === 1)
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+  await humanEvent(mock, "session.execution.started", { sessionID: "ses_v2" })
+  await humanEvent(mock, "form.created", { form: { id: "f1", sessionID: "ses_v2" } })
+  expect((await getGoal("ses_v2"))?.lastStatus).toBe("Waiting for user input.")
+  await humanEvent(mock, "permission.asked", { sessionID: "ses_v2", id: "p1", action: "edit" })
+  await humanEvent(mock, "permission.asked", { sessionID: "ses_v2", id: "p1", action: "edit" })
+  await humanEvent(mock, "permission.asked", { sessionID: "ses_v2", id: "p2", action: "shell" })
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "unknown" })
+  await humanEvent(mock, "session.step.ended", {
+    sessionID: "ses_v2",
+    assistantMessageID: "empty",
+    tokens: { output: 1 },
+  })
+  await humanEvent(mock, "session.execution.failed", {
+    sessionID: "ses_v2",
+    error: { message: "network connection failed" },
+  })
+  await humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  expect(mock.promptCalls).toHaveLength(1)
+  expect(await getGoalInternal("ses_v2")).toMatchObject({
+    waitingForHuman: true,
+    continuationFailures: 0,
+    noProgressTurns: 0,
+  })
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "p1" })
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "p1" })
+  await humanEvent(mock, "form.cancelled", { sessionID: "ses_v2", id: "f1" })
+  expect((await getGoal("ses_v2"))?.waitingForHuman).toBe(true)
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "p2" })
+  expect((await getGoal("ses_v2"))?.waitingForHuman).toBe(false)
+})
+
+test("V2 foreign nested form never mutates goal or prompts", async () => {
+  await createGoal("ses_foreign", "Foreign goal")
+  const file = process.env.OPENCODE_GOAL_STATE_PATH!
+  const mock = makeMockContext(
+    {},
+    [],
+    {},
+    { directory: "/own" },
+    { ses_foreign: { location: { directory: "/foreign" } } },
+  )
+  await setupPlugin(mock as never)
+  await waitFor(() => mock.sessionGetCalls.includes("ses_foreign"))
+  const before = await readFile(file, "utf8")
+  await humanEvent(mock, "form.created", { form: { id: "f1", sessionID: "ses_foreign" } })
+  await humanEvent(mock, "form.replied", {
+    form: { sessionID: "ses_foreign", id: "f1" },
+    sessionID: "ses_v2",
+  })
+  await humanEvent(mock, "permission.asked", {
+    sessionID: "ses_foreign",
+    id: "p1",
+    action: "shell",
+  })
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_foreign", requestID: "p1" })
+  await humanEvent(mock, "permission.asked", { id: "global", action: "shell" })
+  await humanEvent(mock, "form.created", { form: { sessionID: "ses_no_goal", id: "none" } })
+  await humanEvent(mock, "form.replied", { sessionID: "ses_no_goal", id: "none" })
+  expect(await readFile(file, "utf8")).toBe(before)
+  expect(mock.promptCalls).toHaveLength(0)
+})
+
+test("V2 restart lists pending permissions and delayed lists cannot resurrect replied requests", async () => {
+  await createGoal("ses_v2", "Recover permission waits")
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  let resolveList!: (value: Array<{ id: string; action?: string }>) => void
+  let listed = false
+  mock.permission.list = async () => {
+    listed = true
+    return new Promise((resolve) => {
+      resolveList = resolve
+    })
+  }
+  await setupPlugin(mock as never)
+  await waitFor(() => listed)
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "old" })
+  await humanEvent(mock, "permission.asked", { sessionID: "ses_v2", id: "live", action: "edit" })
+  resolveList([
+    { id: "old", action: "shell" },
+    { id: "listed", action: "read" },
+  ])
+  await waitFor(async () => (await getGoal("ses_v2"))?.waitingForHuman === true)
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "live" })
+  await waitFor(async () => (await getGoal("ses_v2"))?.lastStatus === "Awaiting approval: read")
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "listed" })
+  await waitFor(async () => (await getGoal("ses_v2"))?.waitingForHuman === false)
+  await waitFor(() => mock.promptCalls.length === 1)
+})
+
+test("V2 successful empty restart list clears stale wait; failed list retains it", async () => {
+  const { setGoalWaiting } = await import("../src/state")
+  await createGoal("ses_v2", "Recover stale wait")
+  await setGoalWaiting("ses_v2", "shell", true)
+  const failed = makeMockContext({ min_continue_interval_seconds: 0 })
+  failed.permission.list = async () => {
+    throw new Error("list unavailable")
+  }
+  const cleanup = await setupPlugin(failed as never)
+  await humanEvent(failed, "session.idle", { sessionID: "ses_v2" })
+  expect((await getGoal("ses_v2"))?.waitingForHuman).toBe(true)
+  expect(failed.promptCalls).toHaveLength(0)
+  await cleanup()
+  const recovered = makeMockContext({ min_continue_interval_seconds: 0 })
+  await setupPlugin(recovered as never)
+  await waitFor(async () => (await getGoal("ses_v2"))?.waitingForHuman === false)
+  await waitFor(() => recovered.promptCalls.length === 1)
+})
+
+test("V2 recovery gates more than 50 active sessions before startup continuation", async () => {
+  for (let index = 0; index < 55; index += 1)
+    await createGoal(`ses_many_${index}`, `Recover many ${index}`)
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  const listed: string[] = []
+  mock.permission.list = async ({ sessionID }) => {
+    listed.push(sessionID)
+    return sessionID === "ses_many_54" ? [{ id: "late", action: "shell" }] : []
+  }
+  await setupPlugin(mock as never)
+  await humanEvent(mock, "session.idle", { sessionID: "ses_many_54" })
+  await waitFor(() => listed.includes("ses_many_54"))
+  await waitFor(async () => (await getGoal("ses_many_54"))?.waitingForHuman === true)
+  expect(mock.promptCalls.filter((call) => call.sessionID === "ses_many_54")).toHaveLength(0)
+})
+
+test("V2 failed restart list holds unrelated replies until authoritative relist resolves all requests", async () => {
+  const { setGoalWaiting } = await import("../src/state")
+  await createGoal("ses_v2", "Recover unverified wait")
+  await setGoalWaiting("ses_v2", "shell", true)
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  let calls = 0
+  let available = false
+  mock.permission.list = async () => {
+    calls += 1
+    if (!available) throw new Error("list unavailable")
+    return [
+      { id: "a", action: "shell" },
+      { id: "b", action: "edit" },
+    ]
+  }
+  await setupPlugin(mock as never)
+  await waitFor(() => calls === 3)
+  await humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "unrelated" })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect((await getGoal("ses_v2"))?.waitingForHuman).toBe(true)
+  expect(mock.promptCalls).toHaveLength(0)
+  await waitFor(() => calls === 6)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const heldCalls = calls
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "another-unrelated" })
+  expect(calls).toBe(heldCalls)
+  await new Promise((resolve) => setTimeout(resolve, 1_000))
+  available = true
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "unrelated" })
+  await waitFor(() => calls === heldCalls + 1)
+  await waitFor(async () => (await getGoal("ses_v2"))?.lastStatus === "Awaiting approval: shell")
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "a" })
+  await waitFor(async () => (await getGoal("ses_v2"))?.lastStatus === "Awaiting approval: edit")
+  expect(mock.promptCalls).toHaveLength(0)
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "b" })
+  await waitFor(async () => (await getGoal("ses_v2"))?.waitingForHuman === false)
+  await waitFor(() => mock.promptCalls.length === 1)
+})
+
+test("V2 failed list without persisted wait stays blocked and does not prompt", async () => {
+  await createGoal("ses_v2", "Unknown inventory")
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  let calls = 0
+  mock.permission.list = async () => {
+    calls += 1
+    throw new Error("list unavailable")
+  }
+  await setupPlugin(mock as never)
+  await waitFor(() => calls === 3)
+  await humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "unrelated" })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(await getGoal("ses_v2")).toMatchObject({
+    waitingForHuman: true,
+    lastStatus: "Waiting for user input.",
+  })
+  expect(mock.promptCalls).toHaveLength(0)
+})
+
+for (const status of ["paused", "usageLimited"] as const) {
+  test(`V2 final reply while ${status} clears wait before resume`, async () => {
+    const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+    await setupPlugin(mock as never)
+    await createGoalViaV2Tool(mock, `Reply while ${status}`)
+    await humanEvent(mock, "permission.asked", { sessionID: "ses_v2", id: "p1", action: "shell" })
+    if (status === "paused")
+      await goalTool(mock, "update_goal_status").execute({ status: "paused" }, toolContext())
+    else {
+      // Simulate a persisted usage limit reached while native approval is pending.
+      const file = process.env.OPENCODE_GOAL_STATE_PATH!
+      const state = JSON.parse(await readFile(file, "utf8"))
+      state.goals.ses_v2.status = "usageLimited"
+      state.goals.ses_v2.lastAccountedAt = null
+      await writeFile(file, JSON.stringify(state))
+    }
+    await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "p1" })
+    expect(await getGoal("ses_v2")).toMatchObject({
+      status,
+      waitingForHuman: false,
+      elapsedPaused: false,
+    })
+    await goalTool(mock, "update_goal_status").execute({ status: "active" }, toolContext())
+    expect(await getGoal("ses_v2")).toMatchObject({
+      status: "active",
+      waitingForHuman: false,
+      elapsedPaused: false,
+    })
+    await humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+    await waitFor(() => mock.promptCalls.length === 1)
+  })
+}
+
+test("V2 replacement goal ignores reply for prior goal request", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "Old waiting goal")
+  await humanEvent(mock, "permission.asked", { sessionID: "ses_v2", id: "old", action: "shell" })
+  await goalTool(mock, "replace_goal").execute({ objective: "Replacement goal" }, toolContext())
+  const before = await getGoalInternal("ses_v2")
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "old" })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const after = await getGoalInternal("ses_v2")
+  expect({ ...after, sampledAt: 0, timeUsedSeconds: 0 }).toEqual({
+    ...before,
+    sampledAt: 0,
+    timeUsedSeconds: 0,
+  })
+  expect(mock.promptCalls).toHaveLength(0)
+})
+
+test("V2 elapsed opt-out still suppresses and resume/objective edits preserve pending wait", async () => {
+  const mock = makeMockContext({
+    pause_elapsed_while_waiting: false,
+    min_continue_interval_seconds: 0,
+  })
+  await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "Wait without clock freeze")
+  await humanEvent(mock, "form.created", { form: { id: "f1", sessionID: "ses_v2" } })
+  expect(await getGoal("ses_v2")).toMatchObject({ waitingForHuman: true, elapsedPaused: false })
+  await goalTool(mock, "update_goal_status").execute({ status: "paused" }, toolContext())
+  await goalTool(mock, "update_goal_status").execute({ status: "active" }, toolContext())
+  await goalTool(mock, "update_goal_objective").execute(
+    { objective: "Edited waiting goal" },
+    toolContext(),
+  )
+  expect(await getGoal("ses_v2")).toMatchObject({
+    waitingForHuman: true,
+    elapsedPaused: false,
+    lastStatus: "Waiting for user input.",
+  })
+  await humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  expect(mock.promptCalls).toHaveLength(0)
+  await completeGoal("ses_v2", "Done with proof")
+  await humanEvent(mock, "form.replied", { sessionID: "ses_v2", id: "f1" })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(mock.promptCalls).toHaveLength(0)
+  expect((await getGoal("ses_v2"))?.status).toBe("complete")
+})
+
+test("V2 settlements queued during startup recovery claim one continuation", async () => {
+  await createGoal("ses_v2", "Deduplicate startup settlements")
+  let resolveContext!: (value: unknown[]) => void
+  const transcript = new Promise<unknown[]>((resolve) => {
+    resolveContext = resolve
+  })
+  const mock = makeMockContext(
+    { min_continue_interval_seconds: 0 },
+    [],
+    { ses_v2: transcript },
+  )
+  let resolvePrompt!: () => void
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    await new Promise<void>((resolve) => {
+      resolvePrompt = resolve
+    })
+  }
+  await setupPlugin(mock as never)
+  await waitFor(() => mock.contextCalls.includes("ses_v2"))
+  await humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  await humanEvent(mock, "session.execution.succeeded", { sessionID: "ses_v2" })
+  expect(mock.promptCalls).toHaveLength(0)
+  resolveContext([])
+  await waitFor(() => mock.promptCalls.length === 1)
+  // Both recovery waiters have resumed; only the owner may release the marker.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  expect(mock.promptCalls).toHaveLength(1)
+  const reserved = await getGoalInternal("ses_v2")
+  expect(reserved).toMatchObject({ autoTurns: 1, pendingAttempt: { delivered: false } })
+  resolvePrompt()
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+  expect(mock.promptCalls).toHaveLength(1)
+  expect(await getGoalInternal("ses_v2")).toMatchObject({
+    autoTurns: 1,
+    pendingAttempt: { id: reserved!.pendingAttempt!.id, delivered: true },
+  })
+})
+
+test("V2 queued native ask inhibits continuation during deferred preparation", async () => {
+  await createGoal("ses_v2", "Inhibit while recovering transcript")
+  let resolveContext!: (value: unknown[]) => void
+  const transcript = new Promise<unknown[]>((resolve) => {
+    resolveContext = resolve
+  })
+  const mock = makeMockContext(
+    { min_continue_interval_seconds: 0 },
+    [],
+    { ses_v2: transcript },
+  )
+  await setupPlugin(mock as never)
+  await waitFor(() => mock.contextCalls.includes("ses_v2"))
+  const idle = humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  const asked = humanEvent(mock, "permission.asked", {
+    sessionID: "ses_v2",
+    id: "p1",
+    action: "shell",
+  })
+  await asked
+  expect(await getGoalInternal("ses_v2")).toMatchObject({
+    autoTurns: 0,
+    pendingAttempt: null,
+    waitingForHuman: true,
+  })
+  resolveContext([])
+  await idle
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(mock.promptCalls).toHaveLength(0)
+  expect((await getGoalInternal("ses_v2"))?.pendingAttempt).toBeNull()
+  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "p1" })
+  await waitFor(() => mock.promptCalls.length === 1)
+})
+
+test("V2 ask while accepted delivery is in flight keeps committed auto-turn", async () => {
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 })
+  await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "Keep accepted delivery committed")
+  let resolvePrompt!: () => void
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    return new Promise<void>((resolve) => {
+      resolvePrompt = resolve
+    })
+  }
+  const idle = humanEvent(mock, "session.idle", { sessionID: "ses_v2" })
+  await waitFor(() => mock.promptCalls.length === 1)
+  const asked = humanEvent(mock, "permission.asked", {
+    sessionID: "ses_v2",
+    id: "p1",
+    action: "shell",
+  })
+  // A native ask is consumed while delivery is still pending.
+  await asked
+  expect((await getGoal("ses_v2"))?.waitingForHuman).toBe(true)
+  resolvePrompt()
+  await idle
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+  expect(await getGoalInternal("ses_v2")).toMatchObject({
+    autoTurns: 1,
+    waitingForHuman: true,
+    pendingAttempt: { delivered: true },
+  })
 })
