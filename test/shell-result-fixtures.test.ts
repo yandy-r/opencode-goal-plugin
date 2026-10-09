@@ -53,6 +53,8 @@ for (const { name, command } of cases) {
 
     const preTool = toolPart(pre, event.id)
     const postTool = toolPart(post, event.id)
+    expect(preTool.state.status).toBe("completed")
+    expect(postTool.state.status).toBe("completed")
     expect(preTool.state.input).toEqual(event.input)
     expect(preTool.state.content).toEqual(event.result.content)
     expect(preTool.state.metadata).toEqual(event.result.metadata)

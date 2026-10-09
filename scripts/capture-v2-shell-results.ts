@@ -10,6 +10,7 @@ import { join } from "node:path"
 
 const scriptPath = new URL(import.meta.url).pathname
 const worktreeRoot = new URL("..", import.meta.url).pathname
+await mkdir("/tmp/opencode", { recursive: true })
 const root = await mkdtemp("/tmp/opencode/yan-948-capture-")
 const project = join(root, "project")
 await mkdir(project)
@@ -495,6 +496,10 @@ try {
       problems.push(`${c.id}: context changed across restart`)
     const contextTools = toolNodes(post.raw)
     if (contextTools.length === 0) problems.push(`${c.id}: no tool part in restarted context`)
+    const pending = contextTools.filter(
+      (node) => (node as { state?: { status?: unknown } }).state?.status !== "completed",
+    )
+    if (pending.length > 0) problems.push(`${c.id}: ${pending.length} tool part(s) not completed`)
     const hookEvent = hookLines[0]?.event
     const result = hookEvent?.result as Record<string, unknown> | undefined
     const meta = (result?.metadata ?? {}) as Record<string, unknown>
