@@ -2,7 +2,13 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type GoalPlanInput, GoalPlanInputSchema, goalPlanEntries } from "../src/goal-plan"
+import {
+  type GoalPlan,
+  type GoalPlanInput,
+  GoalPlanInputSchema,
+  GoalPlanSchema,
+  goalPlanEntries,
+} from "../src/goal-plan"
 import {
   cancelGoal,
   clearGoal,
@@ -242,4 +248,117 @@ test("a planned objective can only clear its plan with an explicit grant for tha
     requestedPlanEdit: { goalID: goal.id, objective: "Only parser" },
   })
   expect(edited).toMatchObject({ objective: "Only parser", plan: null, planRevision: 2 })
+})
+
+function bigPlanInput(maxLength: number): GoalPlanInput {
+  const phases: GoalPlanInput["phases"] = [
+    {
+      id: "phase-0",
+      objective: "x".repeat(2000),
+      status: "in_progress",
+      tasks: [{ id: "task-0", description: "y".repeat(2000), status: "in_progress" }],
+    },
+  ]
+  for (let i = 1; i < 64; i++) {
+    phases.push({
+      id: `phase-${i}`,
+      objective: "x".repeat(2000),
+      status: "pending",
+      tasks: [{ id: `task-${i}`, description: "y".repeat(2000), status: "pending" }],
+    })
+  }
+  const plan: GoalPlanInput = {
+    summary: "Plan near the persistent size limit",
+    completionCriteria: ["Size-limit regressions pass"],
+    decisions: [],
+    phases: [],
+  }
+  for (const phase of phases) {
+    const candidate = [...plan.phases, phase]
+    if (JSON.stringify({ ...plan, phases: candidate }).length > maxLength) break
+    plan.phases = candidate
+  }
+  return plan
+}
+
+test("near-limit plan keeps revising and persisting while metadata grows past the raw size limit", async () => {
+  const plan = bigPlanInput(124_000)
+  expect(JSON.stringify(plan).length).toBeGreaterThan(110_000)
+  expect(JSON.stringify(plan).length).toBeLessThanOrEqual(124_000)
+  const goal = await createGoal("session", "Near the size limit")
+  const reason = "r".repeat(2000)
+  const revisitEvidence = "e".repeat(2000)
+  for (let revision = 0; revision < 3; revision++) {
+    await updateGoalPlan("session", {
+      goalID: goal.id,
+      expectedRevision: revision,
+      plan,
+      reason,
+      revisitEvidence,
+    })
+  }
+  const read = await getGoal("session")
+  expect(read?.planRevision).toBe(3)
+  expect(read?.plan?.changes).toHaveLength(3)
+  expect(read?.plan?.changes.at(-1)?.revision).toBe(3)
+  const persisted = JSON.parse(await readFile(process.env.OPENCODE_GOAL_STATE_PATH!, "utf8")) as {
+    goals: Record<string, { plan: GoalPlan | null }>
+  }
+  expect(read?.plan).toEqual(persisted.goals.session?.plan)
+  expect(JSON.stringify(persisted.goals.session?.plan).length).toBeGreaterThan(128_000)
+})
+
+test("max-length revisions keep succeeding and the change log stays capped at 32", async () => {
+  const goal = await createGoal("session", "Keep revising")
+  for (let revision = 0; revision < 40; revision++) {
+    await updateGoalPlan("session", {
+      goalID: goal.id,
+      expectedRevision: revision,
+      plan: initialPlan(),
+      reason: `Revision ${revision}: `.padEnd(2000, "r"),
+      revisitEvidence: `Evidence ${revision}: `.padEnd(2000, "e"),
+    })
+  }
+  const read = await getGoal("session")
+  expect(read?.planRevision).toBe(40)
+  expect(read?.plan?.changes).toHaveLength(32)
+  expect(read?.plan?.changes[0]?.revision).toBe(9)
+  expect(read?.plan?.changes.at(-1)?.revision).toBe(40)
+})
+
+test("oversized input stays rejected while stored structural limits stay enforced", async () => {
+  const oversized = bigPlanInput(200_000)
+  expect(JSON.stringify(oversized).length).toBeGreaterThan(128_000)
+  expect(GoalPlanInputSchema.safeParse(oversized).success).toBe(false)
+  const goal = await createGoal("session", "Reject oversized plans")
+  await expect(
+    updateGoalPlan("session", {
+      goalID: goal.id,
+      expectedRevision: 0,
+      plan: oversized,
+      reason: "Too big",
+    }),
+  ).rejects.toThrow("plan exceeds the persistent state size limit")
+  expect((await getGoal("session"))?.plan).toBeNull()
+
+  const stored = {
+    ...initialPlan(),
+    revision: 1,
+    updatedAt: 1,
+    changes: [{ revision: 1, reason: "ok", timestamp: 1 }],
+  }
+  expect(GoalPlanSchema.safeParse(stored).success).toBe(true)
+  const duplicateTask = structuredClone(stored)
+  duplicateTask.phases[1]!.tasks[0]!.id = "compound"
+  expect(GoalPlanSchema.safeParse(duplicateTask).success).toBe(false)
+  const unverifiedTask = structuredClone(stored)
+  unverifiedTask.phases[0]!.tasks[0]!.status = "completed"
+  expect(GoalPlanSchema.safeParse(unverifiedTask).success).toBe(false)
+  const tooManyChanges = structuredClone(stored)
+  tooManyChanges.changes = Array.from({ length: 33 }, (_, index) => ({
+    revision: index + 1,
+    reason: "ok",
+    timestamp: 1,
+  }))
+  expect(GoalPlanSchema.safeParse(tooManyChanges).success).toBe(false)
 })

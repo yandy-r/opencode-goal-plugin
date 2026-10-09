@@ -2886,6 +2886,29 @@ test("V2 create_goal keeps the current busy-turn watchdog armed", async () => {
   await waitFor(() => mock.promptCalls.length === 1)
 
   expect(mock.promptCalls[0]?.text).toContain("rescue this same creation turn")
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+  mock.stream.end()
+  await cleanup()
+})
+
+test("V2 create_goal after the busy watchdog already expired rearms a rescue", async () => {
+  const mock = makeMockContext({ auto_continue: false, max_turn_time: 0.03 })
+  const cleanup = await setupPlugin(mock as never)
+
+  await mock.stream.push({
+    type: "session.status",
+    created: Date.now(),
+    data: { sessionID: "ses_v2", status: { type: "busy" } },
+  })
+  // Let the first watchdog fire with no goal so its timer is consumed.
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(mock.promptCalls).toHaveLength(0)
+
+  await createGoalViaV2Tool(mock, "rescue after expired watchdog")
+  await waitFor(() => mock.promptCalls.length === 1)
+
+  expect(mock.promptCalls[0]?.text).toContain("rescue after expired watchdog")
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
   mock.stream.end()
   await cleanup()
 })

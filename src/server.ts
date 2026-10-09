@@ -1302,6 +1302,7 @@ type GoalServices = {
   syncHumanWait?: (sessionID: string) => Promise<void>
   initializeUsage?: (sessionID: string) => Promise<void>
   stopAutonomy?: (sessionID: string, mode?: "stop" | "replace") => void
+  rearmBusyWatchdog?: (sessionID: string) => void
   consumeObjectiveEdit?: (
     sessionID: string,
     objective: string,
@@ -1367,6 +1368,11 @@ async function createGoalFromTool(
   if (goal.status === "active") services.stopAutonomy?.(context.sessionID, "replace")
   await services.syncHumanWait?.(context.sessionID)
   goal = (await getGoal(context.sessionID)) ?? goal
+  if (goal.status === "active") {
+    // Creating the goal invalidates the continuation epoch. Restore busy-turn
+    // protection only after human waits have been resynced to inhibit rearming.
+    services.rearmBusyWatchdog?.(context.sessionID)
+  }
   return JSON.stringify(
     planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal },
     null,
@@ -1410,6 +1416,8 @@ async function replaceGoalFromTool(
   services.stopAutonomy?.(context.sessionID, "replace")
   await services.initializeUsage?.(context.sessionID)
   await services.syncHumanWait?.(context.sessionID)
+  // Same epoch invalidation as creation; resync human waits before rearming.
+  services.rearmBusyWatchdog?.(context.sessionID)
   return JSON.stringify(
     planningOnly
       ? { ...result, plan_mode_notice: services.messages.notices.planModeCreate }
@@ -2789,6 +2797,9 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (mode === "replace") stoppedExecutions.delete(sessionID)
       else stoppedExecutions.add(sessionID)
     },
+    rearmBusyWatchdog: (sessionID) => {
+      if (!disposed && busySessions.has(sessionID)) armTurnWatchdog(sessionID)
+    },
   }
   const registrations: Array<{ dispose(): Promise<void> }> = []
   let disposed = false
@@ -2866,6 +2877,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       const current = await getGoalInternal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
       if (
+        !isCurrent() ||
         current?.status !== "active" ||
         current.waitingForHuman ||
         isPlanAgent(current.lastPromptAgent) ||
@@ -2879,7 +2891,6 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       claimedContinuation = true
       claimedGoalID = current.id
       watchdogRescuedSessions.add(sessionID)
-      if (!isCurrent()) return
       await sendContinuation(
         sessionID,
         continuationPrompt(current, locale),
