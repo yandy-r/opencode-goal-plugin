@@ -1,0 +1,789 @@
+{
+  "description": "Real OpenCode V2 2.0.25 shell execute.after results and pre/post-restart session context transcripts (yan-948). Normalized: session/message/call IDs, timestamps, and temp paths replaced with stable placeholders; every other field preserved verbatim.",
+  "provenance": {
+    "opencodeVersion": "opencode v2.0.25",
+    "platform": "linux",
+    "baselineSHA": "aa91e646c8f7fa96ddfdf5db5acafd49881eaae4",
+    "captureRoot": "yan-948-capture-S4bisl",
+    "captureRootPath": "<capture-root>",
+    "capturedModelRequests": 6,
+    "capturedHookEvents": 3,
+    "sessions": 3,
+    "timeoutMs": 1500
+  },
+  "hookEvents": {
+    "exit0": {
+      "tool": "shell",
+      "sessionID": "ses_exit0",
+      "agent": "build",
+      "messageID": "msg_1",
+      "id": "call_exit0",
+      "input": {
+        "command": "printf yan948-exit0-ok"
+      },
+      "status": "completed",
+      "result": {
+        "output": {
+          "exit": 0,
+          "truncated": false,
+          "output": "yan948-exit0-ok",
+          "status": "completed"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "yan948-exit0-ok"
+          }
+        ],
+        "metadata": {
+          "status": "completed",
+          "truncated": false,
+          "exit": 0
+        }
+      }
+    },
+    "exit1": {
+      "tool": "shell",
+      "sessionID": "ses_exit1",
+      "agent": "build",
+      "messageID": "msg_2",
+      "id": "call_exit1",
+      "input": {
+        "command": "printf yan948-exit1-stderr >&2; exit 1"
+      },
+      "status": "completed",
+      "result": {
+        "output": {
+          "exit": 1,
+          "truncated": false,
+          "output": "yan948-exit1-stderr",
+          "status": "completed"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "yan948-exit1-stderr"
+          },
+          {
+            "type": "text",
+            "text": "Exited with code 1"
+          }
+        ],
+        "metadata": {
+          "status": "completed",
+          "truncated": false,
+          "exit": 1
+        }
+      }
+    },
+    "timeout": {
+      "tool": "shell",
+      "sessionID": "ses_timeout",
+      "agent": "build",
+      "messageID": "msg_3",
+      "id": "call_timeout",
+      "input": {
+        "command": "printf yan948-timeout-start; sleep 5; printf yan948-timeout-end",
+        "timeout": 1500
+      },
+      "status": "completed",
+      "result": {
+        "output": {
+          "truncated": false,
+          "timeout": true,
+          "output": "yan948-timeout-start\n\nCommand exceeded timeout of 1500 ms. Retry with a larger timeout if the command is expected to take longer.",
+          "status": "completed"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "yan948-timeout-start\n\nCommand exceeded timeout of 1500 ms. Retry with a larger timeout if the command is expected to take longer."
+          },
+          {
+            "type": "text",
+            "text": "Timed out before completion"
+          }
+        ],
+        "metadata": {
+          "status": "completed",
+          "truncated": false,
+          "timeout": true
+        }
+      }
+    }
+  },
+  "sessions": {
+    "exit0": {
+      "pre": [
+        {
+          "id": "msg_4",
+          "time": {
+            "created": 0
+          },
+          "text": "Run marker yan948-case:exit0: make exactly one real shell tool call for the exit0 fixture.",
+          "type": "user"
+        },
+        {
+          "id": "msg_1",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "tool",
+              "id": "call_exit0",
+              "name": "shell",
+              "executed": false,
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "printf yan948-exit0-ok"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "yan948-exit0-ok"
+                  }
+                ],
+                "metadata": {
+                  "status": "completed",
+                  "truncated": false,
+                  "exit": 0
+                }
+              },
+              "time": {
+                "created": 0,
+                "ran": 0,
+                "completed": 0
+              }
+            }
+          ],
+          "finish": "tool-calls",
+          "rawFinish": "tool_calls",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_5",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "yan948-final-text-after-tool-exit0"
+            }
+          ],
+          "finish": "stop",
+          "rawFinish": "stop",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_6",
+          "time": {
+            "created": 0
+          },
+          "type": "idle",
+          "outcome": "succeeded"
+        }
+      ],
+      "post": [
+        {
+          "id": "msg_4",
+          "time": {
+            "created": 0
+          },
+          "text": "Run marker yan948-case:exit0: make exactly one real shell tool call for the exit0 fixture.",
+          "type": "user"
+        },
+        {
+          "id": "msg_1",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "tool",
+              "id": "call_exit0",
+              "name": "shell",
+              "executed": false,
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "printf yan948-exit0-ok"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "yan948-exit0-ok"
+                  }
+                ],
+                "metadata": {
+                  "status": "completed",
+                  "truncated": false,
+                  "exit": 0
+                }
+              },
+              "time": {
+                "created": 0,
+                "ran": 0,
+                "completed": 0
+              }
+            }
+          ],
+          "finish": "tool-calls",
+          "rawFinish": "tool_calls",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_5",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "yan948-final-text-after-tool-exit0"
+            }
+          ],
+          "finish": "stop",
+          "rawFinish": "stop",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_6",
+          "time": {
+            "created": 0
+          },
+          "type": "idle",
+          "outcome": "succeeded"
+        }
+      ]
+    },
+    "exit1": {
+      "pre": [
+        {
+          "id": "msg_7",
+          "time": {
+            "created": 0
+          },
+          "text": "Run marker yan948-case:exit1: make exactly one real shell tool call for the exit1 fixture.",
+          "type": "user"
+        },
+        {
+          "id": "msg_2",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "tool",
+              "id": "call_exit1",
+              "name": "shell",
+              "executed": false,
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "printf yan948-exit1-stderr >&2; exit 1"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "yan948-exit1-stderr"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Exited with code 1"
+                  }
+                ],
+                "metadata": {
+                  "status": "completed",
+                  "truncated": false,
+                  "exit": 1
+                }
+              },
+              "time": {
+                "created": 0,
+                "ran": 0,
+                "completed": 0
+              }
+            }
+          ],
+          "finish": "tool-calls",
+          "rawFinish": "tool_calls",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_8",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "yan948-final-text-after-tool-exit1"
+            }
+          ],
+          "finish": "stop",
+          "rawFinish": "stop",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_9",
+          "time": {
+            "created": 0
+          },
+          "type": "idle",
+          "outcome": "succeeded"
+        }
+      ],
+      "post": [
+        {
+          "id": "msg_7",
+          "time": {
+            "created": 0
+          },
+          "text": "Run marker yan948-case:exit1: make exactly one real shell tool call for the exit1 fixture.",
+          "type": "user"
+        },
+        {
+          "id": "msg_2",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "tool",
+              "id": "call_exit1",
+              "name": "shell",
+              "executed": false,
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "printf yan948-exit1-stderr >&2; exit 1"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "yan948-exit1-stderr"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Exited with code 1"
+                  }
+                ],
+                "metadata": {
+                  "status": "completed",
+                  "truncated": false,
+                  "exit": 1
+                }
+              },
+              "time": {
+                "created": 0,
+                "ran": 0,
+                "completed": 0
+              }
+            }
+          ],
+          "finish": "tool-calls",
+          "rawFinish": "tool_calls",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_8",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "yan948-final-text-after-tool-exit1"
+            }
+          ],
+          "finish": "stop",
+          "rawFinish": "stop",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_9",
+          "time": {
+            "created": 0
+          },
+          "type": "idle",
+          "outcome": "succeeded"
+        }
+      ]
+    },
+    "timeout": {
+      "pre": [
+        {
+          "id": "msg_10",
+          "time": {
+            "created": 0
+          },
+          "text": "Run marker yan948-case:timeout: make exactly one real shell tool call for the timeout fixture.",
+          "type": "user"
+        },
+        {
+          "id": "msg_3",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "tool",
+              "id": "call_timeout",
+              "name": "shell",
+              "executed": false,
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "printf yan948-timeout-start; sleep 5; printf yan948-timeout-end",
+                  "timeout": 1500
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "yan948-timeout-start\n\nCommand exceeded timeout of 1500 ms. Retry with a larger timeout if the command is expected to take longer."
+                  },
+                  {
+                    "type": "text",
+                    "text": "Timed out before completion"
+                  }
+                ],
+                "metadata": {
+                  "status": "completed",
+                  "truncated": false,
+                  "timeout": true
+                }
+              },
+              "time": {
+                "created": 0,
+                "ran": 0,
+                "completed": 0
+              }
+            }
+          ],
+          "finish": "tool-calls",
+          "rawFinish": "tool_calls",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_11",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "yan948-final-text-after-tool-timeout"
+            }
+          ],
+          "finish": "stop",
+          "rawFinish": "stop",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_12",
+          "time": {
+            "created": 0
+          },
+          "type": "idle",
+          "outcome": "succeeded"
+        }
+      ],
+      "post": [
+        {
+          "id": "msg_10",
+          "time": {
+            "created": 0
+          },
+          "text": "Run marker yan948-case:timeout: make exactly one real shell tool call for the timeout fixture.",
+          "type": "user"
+        },
+        {
+          "id": "msg_3",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "tool",
+              "id": "call_timeout",
+              "name": "shell",
+              "executed": false,
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "printf yan948-timeout-start; sleep 5; printf yan948-timeout-end",
+                  "timeout": 1500
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "yan948-timeout-start\n\nCommand exceeded timeout of 1500 ms. Retry with a larger timeout if the command is expected to take longer."
+                  },
+                  {
+                    "type": "text",
+                    "text": "Timed out before completion"
+                  }
+                ],
+                "metadata": {
+                  "status": "completed",
+                  "truncated": false,
+                  "timeout": true
+                }
+              },
+              "time": {
+                "created": 0,
+                "ran": 0,
+                "completed": 0
+              }
+            }
+          ],
+          "finish": "tool-calls",
+          "rawFinish": "tool_calls",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_11",
+          "time": {
+            "created": 0,
+            "streamed": 0,
+            "completed": 0
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "fixture",
+            "providerID": "fixture",
+            "variant": "default"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "yan948-final-text-after-tool-timeout"
+            }
+          ],
+          "finish": "stop",
+          "rawFinish": "stop",
+          "cost": 0,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          }
+        },
+        {
+          "id": "msg_12",
+          "time": {
+            "created": 0
+          },
+          "type": "idle",
+          "outcome": "succeeded"
+        }
+      ]
+    }
+  }
+}
