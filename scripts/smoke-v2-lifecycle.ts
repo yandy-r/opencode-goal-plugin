@@ -245,6 +245,22 @@ try {
     const text = await response.text()
     return text ? JSON.parse(text) : undefined
   }
+  // Native command payload changed from command to name between V2 hosts.
+  // Select the required field from this isolated host, not a version guess.
+  const openapi = await api("/openapi.json")
+  const nativeField = (path: string, current: string, previous: string) => {
+    const required = openapi.paths[path].post.requestBody.content["application/json"].schema
+      .required as string[]
+    const field = required.includes(current) ? current : previous
+    assert(required.includes(field), `Unknown native payload contract: ${path}`)
+    return field
+  }
+  const commandField = nativeField("/api/session/{sessionID}/command", "name", "command")
+  const replyField = nativeField(
+    "/api/session/{sessionID}/permission/{requestID}/reply",
+    "decision",
+    "reply",
+  )
   const created = (await api("/api/session", {
     location: { directory: project },
     title: "Isolated lifecycle smoke",
@@ -301,7 +317,7 @@ try {
   )) as { data: Array<{ name: string }> }
   assert(commands.data.some((command) => command.name === "goal"))
   await api(`/api/session/${sessionID}/command`, {
-    name: "goal",
+    [commandField]: "goal",
     text: "Create a goal for the fixture milestone. Keep it active until the automatic continuation arrives.",
   })
   let state: { goals: Record<string, SmokeGoal> } | undefined
@@ -406,17 +422,17 @@ try {
       const goal = waitGoal()
       return Boolean(
         goal &&
-          goal.status === "active" &&
-          goal.waitingForHuman === true &&
-          goal.elapsedPaused === true &&
-          typeof goal.lastStatus === "string" &&
-          goal.lastStatus.includes("Awaiting approval"),
+        goal.status === "active" &&
+        goal.waitingForHuman === true &&
+        goal.elapsedPaused === true &&
+        typeof goal.lastStatus === "string" &&
+        goal.lastStatus.includes("Awaiting approval"),
       )
     })
     // Settle the manual fixture execution while the ask is pending, so the
     // busy/idle boundary the reply will re-evaluate is already quiet.
     await api(`/api/session/${waitSessionID}/command`, {
-      name: "goal",
+      [commandField]: "goal",
       // A control-only `/goal status` returns after its manual turn; pursuit
       // commands intentionally wait through the human gate.
       text: "status smoke",
@@ -442,7 +458,7 @@ try {
       modelCallsWhilePending,
       "no new model work while the permission request is pending",
     )
-    await api(`${waitingPath}/per_yan935_smoke/reply`, { decision: "once" })
+    await api(`${waitingPath}/per_yan935_smoke/reply`, { [replyField]: "once" })
     await waitFor(
       "permission-wait-continue",
       async () => {
@@ -455,9 +471,9 @@ try {
         const goal = waitGoal()
         return Boolean(
           goal &&
-            (goal.waitingForHuman === false || goal.waitingForHuman == null) &&
-            (goal.elapsedPaused === false || goal.elapsedPaused == null) &&
-            goal.autoTurns >= 1,
+          (goal.waitingForHuman === false || goal.waitingForHuman == null) &&
+          (goal.elapsedPaused === false || goal.elapsedPaused == null) &&
+          goal.autoTurns >= 1,
         )
       },
       () => `goal=${JSON.stringify(waitGoal())}`,
@@ -494,7 +510,7 @@ try {
     agent: "build",
   })) as { data: { id: string } }
   await api(`/api/session/${arraysSession.data.id}/command`, {
-    name: "goal",
+    [commandField]: "goal",
     text: "Create a goal for the arrays-present command smoke.",
     files: [],
     agents: [],
