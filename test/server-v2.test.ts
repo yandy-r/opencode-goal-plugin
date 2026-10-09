@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { Plugin as PluginV2 } from "@opencode/plugin"
 import plugin from "../src/server"
 import {
   accountUsage,
@@ -53,18 +54,33 @@ type MockCommandDraft = {
   add(command: {
     name: string
     description?: string
-    execute: (
-      input: {
-        sessionID: string
-        prompt: MockPrompt
-        delivery: "steer" | "queue"
-      },
-      execution?: { signal?: AbortSignal },
-    ) => Promise<void>
+    execute: (input: {
+      sessionID: string
+      prompt: MockPrompt
+      delivery: "steer" | "queue"
+    }) => Promise<void>
   }): void
 }
 
 type Registration = { dispose: () => Promise<void> }
+
+type SessionHookName = Parameters<PluginV2.Context["session"]["hook"]>[0]
+// Exhaustive against the SDK: hook additions or removals fail typecheck.
+const SESSION_HOOKS: Record<SessionHookName, true> = {
+  prompt: true,
+  context: true,
+  compaction: true,
+  generate: true,
+  title: true,
+  "model.request": true,
+  "http.request": true,
+  "http.response": true,
+  "experimental.ws.handshake": true,
+  "experimental.ws.send": true,
+  "experimental.ws.receive": true,
+  retry: true,
+}
+const SESSION_HOOK_NAMES: readonly string[] = Object.keys(SESSION_HOOKS)
 
 function controlledStream() {
   const queue: Array<{ done: boolean; value?: unknown; processed?: () => void }> = []
@@ -136,7 +152,8 @@ type MockContext = {
     context: (input: { sessionID: string }) => Promise<unknown[]>
     get: (input: {
       sessionID: string
-    }) => Promise<{ data?: { location?: { directory: string; workspaceID?: string | null } } }>
+    }) => Promise<{ location: { directory: string; workspaceID?: string | null } }>
+    wait: (input: { sessionID: string }, options: { signal: AbortSignal }) => Promise<void>
   }
   permission: {
     list: (input: { sessionID: string }) => Promise<Array<{ id: string; action?: string }>>
@@ -200,6 +217,7 @@ function makeMockContext(
     },
     session: {
       hook: async (name, callback) => {
+        if (!SESSION_HOOK_NAMES.includes(name)) throw new Error(`unknown session hook: ${name}`)
         hooks[name] = callback
         return registration(`session.hook:${name}`)
       },
@@ -213,8 +231,11 @@ function makeMockContext(
       },
       get: async (input: { sessionID: string }) => {
         sessionGetCalls.push(input.sessionID)
-        return { data: sessionInfos[input.sessionID] }
+        const info = sessionInfos[input.sessionID]
+        if (!info) throw new Error(`session unavailable: ${input.sessionID}`)
+        return info
       },
+      wait: async () => {},
     },
     permission: { list: async () => [] },
     event: {
@@ -661,12 +682,10 @@ test("V2 disposal aborts a pending command wait", async () => {
     ...mock,
     session: {
       ...mock.session,
-      wait: async (_input: unknown, options: { signal: AbortSignal }) =>
-        new Promise<void>((_resolve, reject) => {
+      // Like the native Promise adapter, this wait ignores request options.
+      wait: async () =>
+        new Promise<void>(() => {
           waiting = true
-          options.signal.addEventListener("abort", () => reject(new Error("aborted")), {
-            once: true,
-          })
         }),
     },
   }
@@ -2319,7 +2338,7 @@ test("V2 cleanup disposes registrations and stops the event consumer", async () 
     expect.arrayContaining([
       "command.transform",
       "session.hook:prompt",
-      "session.hook:interrupt",
+      "session.hook:compaction",
       "tool.transform",
       "tool.hook:execute.before",
       "tool.hook:execute.after",
@@ -3192,33 +3211,108 @@ test("V2 completed tool failures do not clear retry state", async () => {
   await cleanup()
 })
 
-test("V2 command cancellation between idle cycles persists cancellation and stops the wait", async () => {
+test("V2 command pursuit ends on user execution interruption, idle gaps continue, and disposal unblocks the wait", async () => {
   const mock = makeMockContext()
   let waits = 0
+  let finish: (() => void) | undefined
   const context = {
     ...mock,
     session: {
       ...mock.session,
       wait: async () => {
         waits++
+        if (waits > 1)
+          await new Promise<void>((resolve) => {
+            finish = resolve
+          })
       },
     },
   }
-  await setupPlugin(context as never)
+  const cleanup = await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "Goal with idle gaps")
-  const controller = new AbortController()
+  let returned = false
   const command = mock.commands
     .find((command) => command.name === "goal")!
-    .execute(
-      { sessionID: "ses_v2", prompt: { text: "Goal with idle gaps" }, delivery: "steer" },
-      { signal: controller.signal },
-    )
-  await waitFor(() => waits > 0)
-  await mock.hooks.interrupt!({ sessionID: "ses_v2" })
-  controller.abort()
+    .execute({ sessionID: "ses_v2", prompt: { text: "Goal with idle gaps" }, delivery: "steer" })
+    .then(() => {
+      returned = true
+    })
+  // First wait resolves immediately, so the command must not return yet:
+  // pursuit continues across the idle gap until the goal closes.
+  await waitFor(() => waits === 2)
+  expect(returned).toBe(false)
+  // A user-interrupted execution stops pursuit: local timers and preparation
+  // are dropped, an active goal is cancelled, and the waiting command returns.
+  await mock.stream.push({
+    type: "session.execution.interrupted",
+    created: 1,
+    data: { sessionID: "ses_v2", reason: "user" },
+  })
+  finish?.()
   await command
+  await cleanup()
+  expect(returned).toBe(true)
   expect((await getGoal("ses_v2"))?.status).toBe("cancelled")
   expect(mock.promptCalls).toHaveLength(1)
+
+  // A replacement goal in the same session pursues independently: the new
+  // command waits across its own idle gaps while unrelated-system-hook data,
+  // plan detail, and compaction context stay attached to the same session.
+  const mock2 = makeMockContext()
+  let waits2 = 0
+  let finish2: (() => void) | undefined
+  const context2 = {
+    ...mock2,
+    session: {
+      ...mock2.session,
+      wait: async () => {
+        waits2++
+        if (waits2 > 1)
+          await new Promise<void>((resolve) => {
+            finish2 = resolve
+          })
+      },
+    },
+  }
+  const cleanup2 = await setupPlugin(context2 as never)
+  await createGoalViaV2Tool(mock2, "replacement goal")
+  const goal2 = (await getGoal("ses_v2"))!
+  await goalTool(mock2, "update_goal_plan").execute(
+    {
+      goal_id: goal2.id,
+      expected_revision: 0,
+      reason: "Plan the replacement",
+      plan: {
+        summary: "Replacement plan",
+        completionCriteria: ["Replacement verified"],
+        phases: [
+          {
+            id: "work",
+            objective: "Do the replacement work",
+            status: "in_progress",
+            tasks: [{ id: "step", description: "Verify the replacement", status: "in_progress" }],
+          },
+        ],
+        decisions: [],
+      },
+    },
+    toolContext(),
+  )
+  const extra = "unrelated system note"
+  const system = [{ type: "text", text: extra }]
+  await mock2.hooks.context?.({ sessionID: "ses_v2", system })
+  await mock2.hooks.compaction?.({ sessionID: "ses_v2", system })
+  expect(system.map((part) => part.text).join("\n")).toContain(extra)
+  expect(system.map((part) => part.text).join("\n")).toContain("Verify the replacement")
+  const command2 = mock2.commands
+    .find((command) => command.name === "goal")!
+    .execute({ sessionID: "ses_v2", prompt: { text: "replacement goal" }, delivery: "steer" })
+  await waitFor(() => waits2 === 2)
+  // Plugin disposal unblocks the waiting command without closing the goal.
+  await cleanup2()
+  finish2?.()
+  await command2
+  expect((await getGoal("ses_v2"))?.status).toBe("active")
 })
 
 test("V2 wait failure pauses the goal and returns without hidden autonomous continuation", async () => {
@@ -3333,35 +3427,46 @@ test("V2 a stopped event stream pauses a waiting goal rather than polling foreve
   expect((await getGoal("ses_v2"))?.status).toBe("paused")
 })
 
-test("V2 a command transport abort preserves the active goal for reconnection", async () => {
+test("V2 plugin disposal ends a waiting command pursuit and keeps the goal active for reconnection", async () => {
   const mock = makeMockContext()
-  let waits = 0
+  let waiting = false
   const context = {
     ...mock,
     session: {
       ...mock.session,
-      wait: async () => {
-        waits++
-      },
+      // Like the native Promise adapter, this wait ignores request options.
+      wait: async () =>
+        new Promise<void>(() => {
+          waiting = true
+        }),
     },
   }
-  await setupPlugin(context as never)
+  const cleanup = await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "Preserve scope after disconnect")
-  const controller = new AbortController()
   const command = mock.commands
     .find((command) => command.name === "goal")!
-    .execute(
-      {
-        sessionID: "ses_v2",
-        prompt: { text: "Preserve scope after disconnect" },
-        delivery: "steer",
-      },
-      { signal: controller.signal },
-    )
-  await waitFor(() => waits > 0)
-  controller.abort()
+    .execute({
+      sessionID: "ses_v2",
+      prompt: { text: "Preserve scope after disconnect" },
+      delivery: "steer",
+    })
+  await waitFor(() => waiting)
+  await cleanup()
   await command
   expect((await getGoal("ses_v2"))?.status).toBe("active")
+})
+
+test("V2 registers only stable SessionHooks names and no interrupt hook", async () => {
+  const mock = makeMockContext({ auto_continue: false })
+  await setupPlugin(mock as never)
+
+  expect(Object.keys(mock.hooks)).not.toContain("interrupt")
+  expect(mock.hooks["session.interrupt"]).toBeUndefined()
+  for (const name of ["prompt", "context", "compaction"]) {
+    expect(SESSION_HOOK_NAMES).toContain(name)
+    expect(mock.hooks[name]).toBeTypeOf("function")
+  }
+  await expect(mock.session.hook("interrupt", () => {})).rejects.toThrow("unknown session hook")
 })
 
 async function humanEvent(mock: MockContext, type: string, data: Record<string, unknown>) {

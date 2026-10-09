@@ -1612,9 +1612,15 @@ type V2StepRecord = {
   completedAt: number | null
 }
 
-type V2CompactionHookEvent = {
-  readonly sessionID: string
-  system: Array<{ type: string; text: string }>
+// A system part must survive both pre-compaction context transforms and
+// compaction events exactly once, so dedupe before pushing.
+function pushSystemOnce(
+  system: Array<{ type: string; text: string }>,
+  text: string,
+  alreadyPresent: (entry: string) => boolean,
+) {
+  if (system.some((part) => part.type === "text" && alreadyPresent(part.text))) return
+  system.push({ type: "text", text })
 }
 
 function textFromToolResult(result: { output?: unknown; content?: unknown }): string | undefined {
@@ -3256,15 +3262,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     if (inFlight) return inFlight
     const resolution = (async () => {
       try {
-        const response = await context.session.get({ sessionID })
-        const record = response as { data?: unknown } | undefined
-        const info =
-          record && typeof record === "object" && "data" in record ? record.data : response
-        const location = (info as { location?: unknown } | null | undefined)?.location
-        const owned = locationRefMatches(
-          location as { directory?: unknown; workspaceID?: unknown } | null | undefined,
-          context.location,
-        )
+        const info = await context.session.get({ sessionID })
+        const owned = locationRefMatches(info.location, context.location)
         sessionOwnership.set(sessionID, owned)
         return owned
       } catch {
@@ -3712,7 +3711,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           draft.add({
             name: command.name,
             description: command.description,
-            execute: async (input, execution?: { signal?: AbortSignal }) => {
+            execute: async (input) => {
               // Command execution is routed to the session's owning location.
               objectiveEdits.delete(input.sessionID)
               const edit =
@@ -3760,21 +3759,17 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
               const pursue =
                 command.action === "resume" ||
                 (command.action === "goal" && args !== "" && !controlOnly)
-              const signal = execution?.signal
-                ? AbortSignal.any([abortController.signal, execution.signal])
-                : abortController.signal
+              const signal = abortController.signal
               let admitted = false
-              const cancel = () => {
-                if (!pursue || disposed) return
-                goalServices.stopAutonomy?.(input.sessionID)
-                // Transport disposal stops local autonomy without closing the goal.
-              }
-              execution?.signal?.addEventListener("abort", cancel, { once: true })
+              let stopWaiting = () => {}
+              // The 2.0.25 Promise adapter drops session.wait request options.
+              const aborted = new Promise<void>((resolve) => {
+                if (signal.aborted) return resolve()
+                stopWaiting = () => signal.removeEventListener("abort", onAbort)
+                const onAbort = () => resolve()
+                signal.addEventListener("abort", onAbort, { once: true })
+              })
               try {
-                if (execution?.signal?.aborted) {
-                  cancel()
-                  return
-                }
                 await context.session.prompt({
                   ...forwardedPrompt,
                   sessionID: input.sessionID,
@@ -3785,11 +3780,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                 })
                 admitted = true
                 // A goal command owns all its automatic execution cycles.
-                // Older hosts without wait retain admission-only behavior.
-                if (pursue && typeof context.session.wait === "function") {
+                if (pursue) {
                   let pursuedGoalID: string | undefined
                   do {
-                    await context.session.wait({ sessionID: input.sessionID }, { signal })
+                    await Promise.race([
+                      context.session.wait({ sessionID: input.sessionID }),
+                      aborted,
+                    ])
                     if (eventConsumerStopped) throw new Error("goal event stream stopped")
                     const goal = await getGoal(input.sessionID)
                     if (
@@ -3806,8 +3803,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                   } while (!disposed && !signal.aborted)
                 }
               } catch (error) {
-                if (!admitted && !disposed && !execution?.signal?.aborted) throw error
-                if (!disposed && !execution?.signal?.aborted) {
+                if (!admitted && !disposed) throw error
+                if (!disposed) {
                   goalServices.stopAutonomy?.(input.sessionID)
                   v2ErrorLog("Goal command wait failed; autonomous continuation stopped", error)
                   try {
@@ -3818,7 +3815,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                   }
                 }
               } finally {
-                execution?.signal?.removeEventListener("abort", cancel)
+                stopWaiting()
               }
             },
           })
@@ -3860,28 +3857,6 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         }
       }),
     )
-  }
-
-  // New hosts notify explicit user interruption even between execution cycles.
-  // Older hosts retain their execution-interrupted event handling.
-  try {
-    const hookInterrupt = context.session.hook as (
-      name: "interrupt",
-      callback: (event: { sessionID: string }) => Promise<void>,
-    ) => Promise<{ dispose(): Promise<void> }>
-    registrations.push(
-      await hookInterrupt("interrupt", async ({ sessionID }) => {
-        markSessionOwnership(sessionID, true)
-        goalServices.stopAutonomy?.(sessionID)
-        try {
-          await cancelActiveGoal(sessionID)
-        } catch (error) {
-          v2ErrorLog("Failed to persist explicit session cancellation", error)
-        }
-      }),
-    )
-  } catch {
-    // Host predates the explicit session interruption hook.
   }
 
   registrations.push(
@@ -3949,41 +3924,21 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   registrations.push(
     await context.session.hook("context", (sessionContext) => {
       const reminder = systemReminder(locale)
-      if (
-        sessionContext.system.some((part) => part.type === "text" && part.text.includes(reminder))
-      )
-        return
-      sessionContext.system.push({ type: "text", text: reminder })
+      pushSystemOnce(sessionContext.system, reminder, (text) => text.includes(reminder))
     }),
   )
 
   // V2 equivalent of the V1 experimental.session.compacting hook: keep the
-  // active goal visible to the summarizer so compaction cannot drop it. The
-  // compaction hook ships in V2 builds newer than beta-19425 (the newest
-  // published beta this package targets), so register it defensively: hosts
-  // that predate the hook reject or ignore the registration, while newer
-  // hosts preserve the active goal across compaction.
-  try {
-    const hookCompaction = context.session.hook as unknown as (
-      name: "compaction",
-      callback: (event: V2CompactionHookEvent) => Promise<void>,
-    ) => Promise<{ dispose(): Promise<void> }>
-    registrations.push(
-      await hookCompaction("compaction", async (event) => {
-        const goal = await getGoal(event.sessionID)
-        if (!goal) return
-        if (
-          event.system.some(
-            (part) => part.type === "text" && part.text.startsWith(compactionContextPrefix(locale)),
-          )
-        )
-          return
-        event.system.push({ type: "text", text: compactionContext(goal, locale) })
-      }),
-    )
-  } catch {
-    // Host predates the session compaction hook.
-  }
+  // active goal visible to the summarizer so compaction cannot drop it.
+  registrations.push(
+    await context.session.hook("compaction", async (event) => {
+      const goal = await getGoal(event.sessionID)
+      if (!goal) return
+      pushSystemOnce(event.system, compactionContext(goal, locale), (text) =>
+        text.startsWith(compactionContextPrefix(locale)),
+      )
+    }),
+  )
 
   // Rebuild task-deferral state for goals that survived a plugin restart. The
   // plugin context exposes no live child-session query, so this replays each
