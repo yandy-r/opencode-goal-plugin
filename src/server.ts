@@ -36,7 +36,6 @@ import {
   pauseGoalForContinuationError,
   pauseGoalForPlanMode,
   recordAssistantProgress,
-  STALE_PENDING_MS,
   recordContinuationResult,
   recordPromptAgent,
   recordToolProgress,
@@ -44,6 +43,7 @@ import {
   reserveContinuation,
   resolveMaxObjectiveChars,
   rollbackContinuationAttempt,
+  STALE_PENDING_MS,
   setGoalStatus,
   statePath,
   updateGoalObjective,
@@ -2140,13 +2140,19 @@ const server: Plugin = async ({ client }, options?: Options) => {
 
       // Reserve (and persist) the attempt BEFORE delivery so a racing busy can
       // correlate to it. The attempt stays reserved until delivery or rollback.
-      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval, maxPromptFailures)
+      const goal = await reserveContinuation(
+        sessionID,
+        maxAutoTurns,
+        minInterval,
+        maxPromptFailures,
+      )
       if (!goal) {
         const wrapupWake = freshWrapupWakeDelayMs(
           await getGoalInternal(sessionID),
           maxPromptFailures,
         )
-        if (wrapupWake != null) scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null)
+        if (wrapupWake != null)
+          scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null)
         return
       }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now()
@@ -3246,7 +3252,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (!autoContinue) return
       if (!isCurrent() || nativeRetrySessions.has(sessionID)) return
 
-      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval, maxPromptFailures)
+      const goal = await reserveContinuation(
+        sessionID,
+        maxAutoTurns,
+        minInterval,
+        maxPromptFailures,
+      )
       if (!goal) {
         // A fast execution can settle before the minimum interval expires.
         // There may be no further idle event, so retain a timed wake-up rather
@@ -3265,7 +3276,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           )
         }
         const wrapupWake = freshWrapupWakeDelayMs(waiting, maxPromptFailures)
-        if (wrapupWake != null) scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null)
+        if (wrapupWake != null)
+          scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null)
         return
       }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now()
