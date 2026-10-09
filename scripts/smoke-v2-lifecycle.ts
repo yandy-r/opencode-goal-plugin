@@ -422,11 +422,11 @@ try {
       const goal = waitGoal()
       return Boolean(
         goal &&
-        goal.status === "active" &&
-        goal.waitingForHuman === true &&
-        goal.elapsedPaused === true &&
-        typeof goal.lastStatus === "string" &&
-        goal.lastStatus.includes("Awaiting approval"),
+          goal.status === "active" &&
+          goal.waitingForHuman === true &&
+          goal.elapsedPaused === true &&
+          typeof goal.lastStatus === "string" &&
+          goal.lastStatus.includes("Awaiting approval"),
       )
     })
     // Settle the manual fixture execution while the ask is pending, so the
@@ -471,9 +471,9 @@ try {
         const goal = waitGoal()
         return Boolean(
           goal &&
-          (goal.waitingForHuman === false || goal.waitingForHuman == null) &&
-          (goal.elapsedPaused === false || goal.elapsedPaused == null) &&
-          goal.autoTurns >= 1,
+            (goal.waitingForHuman === false || goal.waitingForHuman == null) &&
+            (goal.elapsedPaused === false || goal.elapsedPaused == null) &&
+            goal.autoTurns >= 1,
         )
       },
       () => `goal=${JSON.stringify(waitGoal())}`,
