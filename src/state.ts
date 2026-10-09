@@ -17,7 +17,13 @@ import { statePath } from "./state-path"
 export { statePath } from "./state-path"
 
 export type GoalStatus =
-  "active" | "paused" | "budgetLimited" | "usageLimited" | "complete" | "unmet" | "cancelled"
+  | "active"
+  | "paused"
+  | "budgetLimited"
+  | "usageLimited"
+  | "complete"
+  | "unmet"
+  | "cancelled"
 export type MutableGoalStatus = "active" | "paused"
 export type GoalHistoryType =
   | "created"

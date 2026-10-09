@@ -3544,7 +3544,10 @@ test("V2 failed restart list holds unrelated replies until authoritative relist 
   await waitFor(() => calls === 6)
   await new Promise((resolve) => setTimeout(resolve, 50))
   const heldCalls = calls
-  await humanEvent(mock, "permission.replied", { sessionID: "ses_v2", requestID: "another-unrelated" })
+  await humanEvent(mock, "permission.replied", {
+    sessionID: "ses_v2",
+    requestID: "another-unrelated",
+  })
   expect(calls).toBe(heldCalls)
   await new Promise((resolve) => setTimeout(resolve, 1_000))
   available = true
@@ -3665,11 +3668,7 @@ test("V2 settlements queued during startup recovery claim one continuation", asy
   const transcript = new Promise<unknown[]>((resolve) => {
     resolveContext = resolve
   })
-  const mock = makeMockContext(
-    { min_continue_interval_seconds: 0 },
-    [],
-    { ses_v2: transcript },
-  )
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 }, [], { ses_v2: transcript })
   let resolvePrompt!: () => void
   mock.session.prompt = async (input) => {
     mock.promptCalls.push(input)
@@ -3705,11 +3704,7 @@ test("V2 queued native ask inhibits continuation during deferred preparation", a
   const transcript = new Promise<unknown[]>((resolve) => {
     resolveContext = resolve
   })
-  const mock = makeMockContext(
-    { min_continue_interval_seconds: 0 },
-    [],
-    { ses_v2: transcript },
-  )
+  const mock = makeMockContext({ min_continue_interval_seconds: 0 }, [], { ses_v2: transcript })
   await setupPlugin(mock as never)
   await waitFor(() => mock.contextCalls.includes("ses_v2"))
   const idle = humanEvent(mock, "session.idle", { sessionID: "ses_v2" })

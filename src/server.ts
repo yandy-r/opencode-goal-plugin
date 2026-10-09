@@ -1172,7 +1172,8 @@ class TaskTracker {
 async function recordAssistantMessage(
   sessionID: string,
   message:
-    { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[]; time?: unknown } | undefined,
+    | { info?: unknown; role?: unknown; id?: unknown; parts?: unknown[]; time?: unknown }
+    | undefined,
   options: Options,
   evaluateContinuation = false,
 ) {
@@ -1182,7 +1183,7 @@ async function recordAssistantMessage(
   const text = textFromMessage(message)
   const progressed = Boolean(
     /[\p{L}\p{N}]/u.test(text) &&
-    (id !== (before?.lastAssistantMessageID ?? "") || text !== (before?.lastAssistantText ?? "")),
+      (id !== (before?.lastAssistantMessageID ?? "") || text !== (before?.lastAssistantText ?? "")),
   )
   const goal = await recordAssistantProgress(sessionID, {
     messageID: id,
@@ -3065,8 +3066,8 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, after)
         const progressed = Boolean(
           after &&
-          (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") ||
-            after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")),
+            (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") ||
+              after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")),
         )
         const queuedAfterProgress = scheduledContinuations.get(sessionID)
         if (progressed && queuedAfterProgress?.purpose !== "settle")
