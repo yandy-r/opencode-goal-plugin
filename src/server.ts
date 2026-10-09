@@ -33,8 +33,8 @@ import {
   markPendingContinuationStarted,
   onStateRecovery,
   PLAN_MODE_STOP_REASON,
-  pauseGoalForPlanMode,
   pauseGoalForContinuationError,
+  pauseGoalForPlanMode,
   recordAssistantProgress,
   recordContinuationResult,
   recordPromptAgent,
@@ -2919,9 +2919,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           // Watchdog rescues share the same prompt-failure ceiling: recognized
           // transport errors accumulate toward max_prompt_failures without
           // consuming auto-turn budgets.
-          const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-            expectedGoalID: claimedGoalID,
-          })
+          const afterFailure = await recordContinuationResult(
+            sessionID,
+            "failure",
+            maxPromptFailures,
+            {
+              expectedGoalID: claimedGoalID,
+            },
+          )
           if (autoContinue && afterFailure?.status === "active") {
             scheduleSettledContinuation(
               sessionID,
