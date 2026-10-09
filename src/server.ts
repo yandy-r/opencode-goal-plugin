@@ -29,6 +29,7 @@ import {
   getGoal,
   getGoalHistory,
   getGoalInternal,
+  getPendingWrapupSessions,
   markGoalUnmet,
   markPendingContinuationStarted,
   onStateRecovery,
@@ -43,6 +44,7 @@ import {
   reserveContinuation,
   resolveMaxObjectiveChars,
   rollbackContinuationAttempt,
+  STALE_PENDING_MS,
   setGoalStatus,
   statePath,
   updateGoalObjective,
@@ -101,7 +103,6 @@ const SNAPSHOT_IDLE_HOLD_MS = 250
 const DEFAULT_MAX_TASK_BLOCK_SECONDS = 900
 const TASK_BLOCK_RETRY_MS = 1_000
 const MAX_TIMER_DELAY_MS = 2_147_483_647
-const STALE_PENDING_MS = 30_000
 const RETRY_SETTLE_MS = 25
 const TRANSPORT_ERROR_PATTERN =
   /\b(?:network|fetch|socket|connect|connection|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|transport|stream|websocket|offline|internet|request failed|proxy)\b/i
@@ -183,7 +184,9 @@ function continuationStillReserved(
   return (
     current?.id === goal.id &&
     current.status === goal.status &&
-    (goal.status !== "active" || current.pendingAttempt?.id === goal.pendingAttempt?.id)
+    (goal.status === "active" || goal.pendingAttempt?.kind === "wrapup"
+      ? current.pendingAttempt?.id === goal.pendingAttempt?.id
+      : true)
   )
 }
 
@@ -1456,6 +1459,59 @@ function taskDeferralGoalContinuable(goal: GoalSnapshot | null | undefined) {
   return goal.status === "active"
 }
 
+// A limited goal still owes its final handoff when it is unconfirmed and no
+// undelivered wrap-up attempt is live. A stale undelivered attempt (e.g. left
+// by a plugin restart) is retried rather than treated as permanently sent.
+function limitedGoalOwesWrapup(goal: InternalGoalSnapshot | null) {
+  if (!goal) return false
+  if (goal.status !== "budgetLimited" && goal.status !== "usageLimited") return false
+  if (goal.budgetWrapupSent) return false
+  const attempt = goal.pendingAttempt
+  if (attempt?.kind === "wrapup" && !attempt.delivered) {
+    return Date.now() - attempt.reservedAt >= STALE_PENDING_MS
+  }
+  return true
+}
+
+// A fresh undelivered wrap-up left by a restart blocks reservation until it is
+// stale. Return the delay until it becomes replaceable so the caller can keep
+// a timed wake instead of waiting for an unrelated event; null when not owed.
+function freshWrapupWakeDelayMs(goal: InternalGoalSnapshot | null, maxFailures: number) {
+  if (!goal || goal.budgetWrapupSent || goal.wrapupFailures >= maxFailures) return null
+  if (goal.status !== "budgetLimited" && goal.status !== "usageLimited") return null
+  const attempt = goal.pendingAttempt
+  if (attempt?.kind !== "wrapup" || attempt.delivered) return null
+  return Math.max(0, attempt.reservedAt + STALE_PENDING_MS - Date.now())
+}
+
+// The wrap-up retry after a failed final-handoff delivery: bounded to one
+// retry episode per limited goal, mirroring the active-goal failure retry.
+function shouldRetryWrapup(afterFailure: InternalGoalSnapshot | null, maxFailures: number) {
+  if (!afterFailure) return false
+  if (!limitedGoalOwesWrapup(afterFailure)) return false
+  return afterFailure.wrapupFailures < maxFailures
+}
+
+// The prompt was admitted but the lifecycle changed in flight. An accepted
+// final handoff must be recorded as sent (matching ids only, so a replacement
+// goal is never touched) or it would be sent twice. Any other attempt keeps
+// the existing roll-back-on-teardown behavior.
+async function settleUncurrentDelivery(
+  sessionID: string,
+  goal: InternalGoalSnapshot,
+  goalID: string | undefined,
+  attemptID: string | undefined,
+) {
+  if (goal.pendingAttempt?.kind === "wrapup" && goalID && attemptID) {
+    await recordContinuationResult(sessionID, "success", 1, {
+      expectedGoalID: goalID,
+      expectedAttemptID: attemptID,
+    })
+    return
+  }
+  await rollbackContinuationAttempt(sessionID, { goalID, attemptID })
+}
+
 function existingGoalResult(
   goal: GoalSnapshot,
   requestedObjective: string,
@@ -1611,6 +1667,8 @@ type V2StepRecord = {
   text: string
   outputTokens: number | null
   completedAt: number | null
+  /** The step ended as failed: accounted but never proves transport health. */
+  failed?: boolean
 }
 
 // A system part must survive both pre-compaction context transforms and
@@ -1931,7 +1989,13 @@ const server: Plugin = async ({ client }, options?: Options) => {
             return
           if (purpose === "retry") {
             const goal = await getGoalInternal(sessionID)
-            if (!goal || (goal.continuationFailures === 0 && goal.pendingAttempt == null)) return
+            if (
+              !goal ||
+              (goal.continuationFailures === 0 &&
+                goal.wrapupFailures === 0 &&
+                goal.pendingAttempt == null)
+            )
+              return
           }
           if (
             scheduledContinuations.get(sessionID) !== scheduled ||
@@ -1974,6 +2038,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
     let attemptReservedAt = Date.now()
     let attemptGoalID: string | undefined
     let attemptID: string | undefined
+    let attemptWrapup = false
     try {
       const latestAssistant = await fetchLatestAssistant(client, sessionID)
       if (!isCurrent()) return
@@ -2076,11 +2141,25 @@ const server: Plugin = async ({ client }, options?: Options) => {
 
       // Reserve (and persist) the attempt BEFORE delivery so a racing busy can
       // correlate to it. The attempt stays reserved until delivery or rollback.
-      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval)
-      if (!goal) return
+      const goal = await reserveContinuation(
+        sessionID,
+        maxAutoTurns,
+        minInterval,
+        maxPromptFailures,
+      )
+      if (!goal) {
+        const wrapupWake = freshWrapupWakeDelayMs(
+          await getGoalInternal(sessionID),
+          maxPromptFailures,
+        )
+        if (wrapupWake != null)
+          scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null)
+        return
+      }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now()
       attemptGoalID = goal.id
       attemptID = goal.pendingAttempt?.id
+      attemptWrapup = goal.pendingAttempt?.kind === "wrapup"
       const beforeDelivery = await getGoalInternal(sessionID)
       if (
         !isCurrent() ||
@@ -2103,14 +2182,16 @@ const server: Plugin = async ({ client }, options?: Options) => {
       )
       if (!lifecycleCurrent()) {
         // The goal was stopped/replaced or the plugin disposed in flight: roll the
-        // reserved turn back instead of committing a continuation afterward.
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
+        // reserved turn back instead of committing a continuation afterward. An
+        // accepted final handoff was really admitted, so record it as sent.
+        await settleUncurrentDelivery(sessionID, goal, attemptGoalID, attemptID)
         return
       }
       // Commit the delivered attempt. A busy that raced the resolution already
       // marked it started (started=true is preserved).
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
+        ...(goal.pendingAttempt?.kind === "wrapup" ? { expectedAttemptID: attemptID } : {}),
       })
       if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID)
@@ -2141,7 +2222,10 @@ const server: Plugin = async ({ client }, options?: Options) => {
             expectedAttemptID: attemptID,
           },
         )
-        if (autoContinue && afterFailure?.status === "active") {
+        if (
+          autoContinue &&
+          (afterFailure?.status === "active" || shouldRetryWrapup(afterFailure, maxPromptFailures))
+        ) {
           scheduleSettledContinuation(
             sessionID,
             continuationRetryDelayMs(minInterval, attemptReservedAt),
@@ -2149,6 +2233,13 @@ const server: Plugin = async ({ client }, options?: Options) => {
             "retry",
           )
         }
+      } else if (attemptWrapup) {
+        // A rejected final handoff counts toward its own bounded cap; the
+        // limited goal keeps its status and stop reason.
+        await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+          expectedGoalID: attemptGoalID,
+          expectedAttemptID: attemptID,
+        })
       } else {
         // Non-transport prompt errors (provider/config faults, aborts) are not
         // transport or no-response failures: they do not increment the ceiling
@@ -2987,7 +3078,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
             return
           if (purpose === "retry") {
             const goal = await getGoalInternal(sessionID)
-            if (!goal || (goal.continuationFailures === 0 && goal.pendingAttempt == null)) return
+            if (
+              !goal ||
+              (goal.continuationFailures === 0 &&
+                goal.wrapupFailures === 0 &&
+                goal.pendingAttempt == null)
+            )
+              return
           }
           if (
             scheduledContinuations.get(sessionID) !== scheduled ||
@@ -3046,6 +3143,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     let attemptReservedAt = Date.now()
     let attemptGoalID: string | undefined
     let attemptID: string | undefined
+    let attemptWrapup = false
     let delivering = false
     try {
       const latestStep = latestStepBySession.get(sessionID)
@@ -3090,13 +3188,18 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           maxNoProgressTurns: positiveIntegerOrNull(options.max_no_progress_turns),
           evaluateContinuation: true,
           completedAt: latestStep.completedAt,
+          failedStep: latestStep.failed ?? false,
         })
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, after)
-        const progressed = Boolean(
-          after &&
-            (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") ||
-              after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")),
-        )
+        // A failed step never counts as settlement progress: it must not
+        // cancel a queued retry or resolve the pending attempt.
+        const progressed =
+          latestStep.failed !== true &&
+          Boolean(
+            after &&
+              (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") ||
+                after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")),
+          )
         const queuedAfterProgress = scheduledContinuations.get(sessionID)
         if (progressed && queuedAfterProgress?.purpose !== "settle")
           cancelScheduledContinuation(sessionID)
@@ -3150,7 +3253,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (!autoContinue) return
       if (!isCurrent() || nativeRetrySessions.has(sessionID)) return
 
-      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval)
+      const goal = await reserveContinuation(
+        sessionID,
+        maxAutoTurns,
+        minInterval,
+        maxPromptFailures,
+      )
       if (!goal) {
         // A fast execution can settle before the minimum interval expires.
         // There may be no further idle event, so retain a timed wake-up rather
@@ -3168,11 +3276,15 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
             scheduled != null,
           )
         }
+        const wrapupWake = freshWrapupWakeDelayMs(waiting, maxPromptFailures)
+        if (wrapupWake != null)
+          scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null)
         return
       }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now()
       attemptGoalID = goal.id
       attemptID = goal.pendingAttempt?.id
+      attemptWrapup = goal.pendingAttempt?.kind === "wrapup"
       const beforeDelivery = await getGoalInternal(sessionID)
       if (
         !isCurrent() ||
@@ -3198,7 +3310,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       )
       delivering = false
       if (!lifecycleCurrent()) {
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
+        await settleUncurrentDelivery(sessionID, goal, attemptGoalID, attemptID)
         return
       }
       // Delivery succeeded, so commit the attempt even if the timer that
@@ -3206,6 +3318,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       // here would refund an accepted prompt and allow a duplicate on idle.
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         expectedGoalID: attemptGoalID,
+        ...(goal.pendingAttempt?.kind === "wrapup" ? { expectedAttemptID: attemptID } : {}),
       })
       if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID)
@@ -3230,7 +3343,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
             expectedAttemptID: attemptID,
           },
         )
-        if (autoContinue && afterFailure?.status === "active") {
+        if (
+          autoContinue &&
+          (afterFailure?.status === "active" || shouldRetryWrapup(afterFailure, maxPromptFailures))
+        ) {
           scheduleSettledContinuation(
             sessionID,
             continuationRetryDelayMs(minInterval, attemptReservedAt),
@@ -3238,6 +3354,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
             "retry",
           )
         }
+      } else if (attemptWrapup) {
+        // A rejected final handoff counts toward its own bounded cap; the
+        // limited goal is never paused and keeps its stop reason.
+        await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+          expectedGoalID: attemptGoalID,
+          expectedAttemptID: attemptID,
+        })
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         // A host rejection that is not transient will repeat on every retry, so
@@ -3708,22 +3831,22 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           noProgressTokenThreshold: positiveIntegerOrNull(options.no_progress_token_threshold),
           maxNoProgressTurns: positiveIntegerOrNull(options.max_no_progress_turns),
           completedAt: event.created,
+          failedStep: true,
         })
         await reconcileLocalMarkerAfterProgress(
           locallyDeliveredPendingSessions,
           sessionID,
           afterStep,
         )
-        if (/[\p{L}\p{N}]/u.test(text)) {
-          const scheduled = scheduledContinuations.get(sessionID)
-          if (scheduled?.purpose === "recovery") cancelScheduledContinuation(sessionID)
-        }
+        // A failed step is not proof of recovery: leave any recovery timer and
+        // the pending attempt to terminal execution handling.
         latestStepBySession.set(sessionID, {
           messageID,
           agent: latestStepBySession.get(sessionID)?.agent,
           text,
           outputTokens,
           completedAt: event.created,
+          failed: true,
         })
         return
       }
@@ -4020,6 +4143,18 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   const taskRecoveryComplete = humanRecoverySessions.then(recoverTrackedTasks).catch((error) => {
     v2ErrorLog("Task recovery from transcript failed", error)
   })
+  // A restarted process may hold an unconfirmed final handoff with no future
+  // settlement event, so arm its stale-reservation wake at startup.
+  void taskRecoveryComplete
+    .then(async () => {
+      for (const sessionID of await getPendingWrapupSessions()) {
+        if (disposed) return
+        if (!(await ownsSession(sessionID))) continue
+        const wake = freshWrapupWakeDelayMs(await getGoalInternal(sessionID), maxPromptFailures)
+        if (wake != null) scheduleSettledContinuation(sessionID, wake)
+      }
+    })
+    .catch((error) => v2ErrorLog("Wrap-up recovery failed", error))
 
   // Restart recovery. Every active goal is gated before the first await so a
   // lifecycle event for a later session cannot slip past a pre-restart request.

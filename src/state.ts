@@ -69,6 +69,12 @@ export type AssistantProgressInput = {
   noProgressTokenThreshold?: number | null
   maxNoProgressTurns?: number | null
   evaluateContinuation?: boolean
+  /**
+   * The observation comes from a failed step. Text/checkpoint/message identity
+   * are still recorded, but it never proves transport health: failure counters,
+   * the pending attempt and continuation evaluation are left to terminal handling.
+   */
+  failedStep?: boolean
   /** Millisecond completedAt of the assistant message, for correlating progress to the current attempt. */
   completedAt?: number | null
 }
@@ -95,6 +101,12 @@ export type PendingAttempt = {
   armNoProgress: boolean
   /** lastContinuationAt value to restore if this unconsumed attempt is rolled back. */
   previousLastContinuationAt: number | null
+  /**
+   * "wrapup" marks the single final-handoff prompt of a limited goal. Absent
+   * means a normal continuation. A wrap-up reservation consumes no autoTurn and
+   * leaves budgetWrapupSent=false until the prompt is admitted.
+   */
+  kind?: "continue" | "wrapup"
 }
 
 export type Goal = {
@@ -117,6 +129,8 @@ export type Goal = {
   autoTurns: number
   lastContinuationAt: number | null
   continuationFailures: number
+  /** Failed final-handoff deliveries; independent of continuationFailures. */
+  wrapupFailures: number
   pendingAttempt: PendingAttempt | null
   lastStatus: string | null
   maxAutoTurns: number | null
@@ -196,6 +210,9 @@ const MAX_ARCHIVED_GOALS_TOTAL = 200
 const MAX_ARCHIVED_OBJECTIVE_CHARS = 2_000
 const MAX_ARCHIVED_HISTORY_ENTRIES = 20
 const CHECKPOINT_CHAR_LIMIT = 280
+/** Age after which an unresolved pending attempt is treated as abandoned (restart recovery). */
+export const STALE_PENDING_MS = 30_000
+const DEFAULT_MAX_WRAPUP_FAILURES = 3
 const DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD = 50
 const DEFAULT_MAX_NO_PROGRESS_TURNS = 2
 const MAX_AUTO_CONTINUES_STOP_REASON_PREFIX = "max auto-continues reached ("
@@ -235,6 +252,7 @@ const PendingAttemptSchema = Schema.Struct({
   committed: Schema.Boolean,
   armNoProgress: Schema.Boolean,
   previousLastContinuationAt: Schema.NullOr(Schema.Number),
+  kind: Schema.optional(Schema.Literal("continue", "wrapup")),
 })
 const UsageTrackerSchema = Schema.Struct({
   baseline: Schema.optionalWith(Schema.Unknown, { default: () => null }),
@@ -277,6 +295,7 @@ const GoalSchema = Schema.Struct({
   autoTurns: Schema.Number,
   lastContinuationAt: NullableNumber,
   continuationFailures: Schema.optionalWith(Schema.Number, { default: () => 0 }),
+  wrapupFailures: Schema.optionalWith(Schema.Number, { default: () => 0 }),
   pendingAttempt: Schema.optionalWith(Schema.NullOr(PendingAttemptSchema), { default: () => null }),
   lastStatus: Schema.optionalWith(NullableString, { default: () => null }),
   maxAutoTurns: Schema.optionalWith(NullableNumber, { default: () => null }),
@@ -350,7 +369,12 @@ const PersistedStateSchema = Schema.Union(LegacyStateSchema, StateSchema)
 // getGoalInternal / the internal snapshot type instead.
 export type GoalSnapshot = Omit<
   Goal,
-  "lastAccountedAt" | "autoTurns" | "lastContinuationAt" | "pendingAttempt" | "usageTrackers"
+  | "lastAccountedAt"
+  | "autoTurns"
+  | "lastContinuationAt"
+  | "pendingAttempt"
+  | "usageTrackers"
+  | "wrapupFailures"
 > & {
   remainingTokens: number | null
   sampledAt: number
@@ -362,6 +386,7 @@ export type GoalSnapshot = Omit<
 /** Internal view of a goal with the pending-attempt lifecycle exposed. */
 export type InternalGoalSnapshot = GoalSnapshot & {
   pendingAttempt: PendingAttempt | null
+  wrapupFailures: number
 }
 
 export type GoalListItem = Pick<
@@ -746,6 +771,7 @@ function normalizeGoal(goal: Goal) {
         )
       : null
   goal.pendingAttempt = normalizePendingAttempt(goal.pendingAttempt)
+  goal.wrapupFailures = nonNegativeInteger(goal.wrapupFailures, 0)
   goal.continuationBaselineMessageID ??= ""
   goal.continuationBaselineSummary ??= ""
   goal.noProgressTurns = nonNegativeInteger(goal.noProgressTurns, 0)
@@ -809,6 +835,7 @@ function normalizePendingAttempt(
       Number.isFinite(attempt.previousLastContinuationAt)
         ? attempt.previousLastContinuationAt
         : null,
+    ...(attempt.kind === "wrapup" ? { kind: "wrapup" as const } : {}),
   }
 }
 
@@ -921,7 +948,11 @@ export function snapshot(goal: Goal): GoalSnapshot {
 }
 
 export function snapshotInternal(goal: Goal): InternalGoalSnapshot {
-  return { ...snapshot(goal), pendingAttempt: goal.pendingAttempt }
+  return {
+    ...snapshot(goal),
+    pendingAttempt: goal.pendingAttempt,
+    wrapupFailures: goal.wrapupFailures,
+  }
 }
 
 export async function getGoal(sessionID: string) {
@@ -945,6 +976,20 @@ export async function getActiveGoalSessions() {
   return Object.values(state.goals)
     .filter((goal) => goal.status === "active")
     .map((goal) => ({ sessionID: goal.sessionID, id: goal.id }))
+}
+
+/** Uncapped limited goals whose admitted final handoff is still unconfirmed, for startup wake recovery. */
+export async function getPendingWrapupSessions() {
+  const state = await readState()
+  return Object.values(state.goals)
+    .filter(
+      (goal) =>
+        (goal.status === "budgetLimited" || goal.status === "usageLimited") &&
+        !goal.budgetWrapupSent &&
+        goal.pendingAttempt?.kind === "wrapup" &&
+        !goal.pendingAttempt.delivered,
+    )
+    .map((goal) => goal.sessionID)
 }
 
 export async function getAllGoals() {
@@ -1016,6 +1061,7 @@ function createGoalRecord(
     autoTurns: 0,
     lastContinuationAt: null,
     continuationFailures: 0,
+    wrapupFailures: 0,
     pendingAttempt: null,
     lastStatus: paused
       ? "Goal recorded from Plan mode; execution paused until resumed from Build mode."
@@ -1183,6 +1229,7 @@ export async function updateGoalObjective(
     goal.closedAt = null
     goal.stopReason = planModePause ? PLAN_MODE_STOP_REASON : null
     goal.budgetWrapupSent = false
+    goal.wrapupFailures = 0
     if (goal.status === "active") {
       goal.continuationFailures = 0
       if (goal.waitingForHuman !== true) {
@@ -1290,6 +1337,7 @@ export async function setGoalStatus(
     goal.noProgressTurns = status === "active" ? 0 : goal.noProgressTurns
     goal.stopReason = status === "active" ? null : "paused"
     goal.budgetWrapupSent = status === "active" ? false : goal.budgetWrapupSent
+    goal.wrapupFailures = status === "active" ? 0 : goal.wrapupFailures
     goal.blocker = status === "active" ? null : goal.blocker
     if (agentValue) goal.lastPromptAgent = agentValue
     goal.lastStatus = status === "active" ? "Goal resumed." : "Goal paused."
@@ -1644,7 +1692,7 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
     // Substantive assistant text proves the continuation transport is healthy,
     // so a pending continuation is resolved and any accumulated prompt failures
     // are cleared. Delivery of a prompt alone never resets the counter.
-    if (substantive && summary && (!repeatedMessage || changed)) {
+    if (input.failedStep !== true && substantive && summary && (!repeatedMessage || changed)) {
       // Correlate the progress to the current attempt: delayed output that
       // completed before this attempt was reserved belongs to a prior turn and
       // must not clear a newer pending attempt. Guarded by the attempt's
@@ -1662,6 +1710,7 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
     // record checkpoints above but never touch the counter.
     const attemptForCompletion = goal.pendingAttempt
     const continuationTurnCompleted =
+      input.failedStep !== true &&
       input.evaluateContinuation === true &&
       goal.waitingForHuman !== true &&
       goal.awaitingContinuationProgress &&
@@ -1715,6 +1764,7 @@ export async function reserveContinuation(
   sessionID: string,
   maxAutoTurns: number,
   minIntervalSeconds: number,
+  maxWrapupFailures?: number,
 ) {
   return mutate((state) => {
     const goal = state.goals[sessionID]
@@ -1722,11 +1772,12 @@ export async function reserveContinuation(
     // A human-gated goal never auto-continues, including limit wrap-up.
     if (goal.waitingForHuman === true) return null
     if (goal.status === "budgetLimited" || goal.status === "usageLimited")
-      return reserveWrapup(goal)
+      return reserveWrapup(goal, maxWrapupFailures)
     if (!canContinue(goal.status)) return null
     const now = nowSeconds()
     accountWallClock(goal, now)
-    if (maybeStopForUsageLimit(goal, maxAutoTurns, now)) return reserveWrapup(goal)
+    if (maybeStopForUsageLimit(goal, maxAutoTurns, now))
+      return reserveWrapup(goal, maxWrapupFailures)
     if (goal.lastContinuationAt && now - goal.lastContinuationAt < minIntervalSeconds) return null
     goal.autoTurns += 1
     const previousLastContinuationAt = goal.lastContinuationAt
@@ -1758,7 +1809,9 @@ export async function reserveContinuation(
  * autoTurn or lastContinuationAt because it was canceled before the prompt was
  * actually sent (e.g. a native retry, a dispose, or a plan/task deferral that
  * short-circuited before delivery). Returns true if a committed attempt was
- * rolled back.
+ * rolled back. An undelivered final-handoff (wrapup) attempt is cleared when
+ * its identity matches; it consumed no auto-turn so nothing is refunded and
+ * budgetWrapupSent stays false so the handoff can be reserved again.
  */
 export async function rollbackContinuationAttempt(
   sessionID: string,
@@ -1770,6 +1823,13 @@ export async function rollbackContinuationAttempt(
     if (expected?.goalID && goal.id !== expected.goalID) return false
     const attempt = goal.pendingAttempt
     if (expected?.attemptID && attempt?.id !== expected.attemptID) return false
+    if (attempt?.kind === "wrapup") {
+      // Undelivered wrapup consumed no auto-turn: clear only, refund nothing.
+      if (attempt.delivered) return false
+      goal.pendingAttempt = null
+      goal.updatedAt = nowSeconds()
+      return true
+    }
     if (!attempt || attempt.delivered || !attempt.committed) {
       if (attempt && !attempt.delivered) goal.pendingAttempt = null
       return false
@@ -1804,8 +1864,27 @@ export async function recordContinuationResult(
     if (options?.expectedAttemptID && goal.pendingAttempt?.id !== options.expectedAttemptID)
       return null
     const now = nowSeconds()
+    const wrapup = goal.pendingAttempt?.kind === "wrapup" && isLimited(goal.status)
+    // Limited goal without a wrapup attempt: result is stale, never mutate.
+    if (isLimited(goal.status) && !wrapup) return snapshotInternal(goal)
+    // Delivered wrapup is final: duplicate success/failure is a no-op.
+    if (wrapup && goal.pendingAttempt?.delivered) return snapshotInternal(goal)
     goal.updatedAt = now
     if (result === "success") {
+      if (wrapup && goal.pendingAttempt) {
+        // The single final handoff is confirmed sent. Limit status, stop reason
+        // and blocker are untouched; it never arms the no-progress evaluation.
+        goal.pendingAttempt.delivered = true
+        goal.budgetWrapupSent = true
+        goal.wrapupFailures = 0
+        goal.lastStatus = "Final handoff prompt sent."
+        pushHistory(
+          goal,
+          "limited",
+          `${goal.status}: ${goal.stopReason ?? "goal limit reached"}; requested final handoff.`,
+        )
+        return snapshotInternal(goal)
+      }
       // Successful delivery commits the reserved attempt (it was armed before
       // delivery so a racing busy already correlated to it). Delivery alone is
       // not "started": a session.status busy event marks it started through
@@ -1843,6 +1922,22 @@ export async function recordContinuationResult(
     // ceiling. requirePending ensures a failure without a pending attempt (e.g.
     // a stray duplicate transport event) is not double-counted.
     if (options?.requirePending && goal.pendingAttempt == null) return null
+    if (wrapup) {
+      // A failed final handoff is independent of the active-goal failure
+      // counter: it keeps the limit status/reason and never pauses the goal.
+      // Once wrapupFailures reaches maxFailures, reserveWrapup refuses further
+      // automatic reservations. budgetWrapupSent stays false: the handoff was
+      // never confirmed sent.
+      goal.pendingAttempt = null
+      goal.wrapupFailures += 1
+      goal.lastStatus = `Final handoff failed ${goal.wrapupFailures} time(s).`
+      pushHistory(goal, "error", goal.lastStatus)
+      if (goal.wrapupFailures >= maxFailures) {
+        goal.lastStatus = `Final handoff not delivered after ${goal.wrapupFailures} failure(s); automatic retries stopped.`
+        pushHistory(goal, "error", goal.lastStatus)
+      }
+      return snapshotInternal(goal)
+    }
     // Human gating is not a transport failure. Keep the accepted attempt so
     // progress can resolve it after the user answers.
     if (goal.waitingForHuman === true) return snapshotInternal(goal)
@@ -1927,16 +2022,40 @@ export async function recordToolProgress(
   })
 }
 
-function reserveWrapup(goal: Goal): InternalGoalSnapshot | null {
+// The final handoff is reserved as a pending attempt and only counts as sent
+// (budgetWrapupSent) once the prompt is confirmed delivered, so a failed or
+// canceled send can be retried. It consumes no auto-turn.
+function reserveWrapup(goal: Goal, maxWrapupFailures?: number): InternalGoalSnapshot | null {
   if (goal.budgetWrapupSent) return null
-  goal.budgetWrapupSent = true
+  const inFlight = goal.pendingAttempt
+  if (inFlight?.kind === "wrapup" && !inFlight.delivered) {
+    // A live undelivered wrap-up blocks a duplicate.
+    if (Date.now() - inFlight.reservedAt < STALE_PENDING_MS) return null
+    // A stale one (left by a restart or lost send) is abandoned and counted as
+    // a failed delivery, so repeated restarts cannot retry unboundedly.
+    goal.pendingAttempt = null
+    goal.wrapupFailures += 1
+  }
+  if (goal.wrapupFailures >= (maxWrapupFailures ?? DEFAULT_MAX_WRAPUP_FAILURES)) {
+    goal.updatedAt = nowSeconds()
+    return null
+  }
+  goal.pendingAttempt = {
+    id: randomId(),
+    reservedAt: Date.now(),
+    started: false,
+    delivered: false,
+    committed: false,
+    armNoProgress: false,
+    previousLastContinuationAt: goal.lastContinuationAt,
+    kind: "wrapup",
+  }
   goal.updatedAt = nowSeconds()
-  pushHistory(
-    goal,
-    "limited",
-    `${goal.status}: ${goal.stopReason ?? "goal limit reached"}; requested final handoff.`,
-  )
   return snapshotInternal(goal)
+}
+
+function isLimited(status: GoalStatus) {
+  return status === "budgetLimited" || status === "usageLimited"
 }
 
 function maybeStopForBudget(goal: Goal) {

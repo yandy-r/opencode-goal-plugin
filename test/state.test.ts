@@ -530,9 +530,152 @@ test("reserves continuation until max auto turns is reached", async () => {
   expect(await reserveContinuation("ses_1", 1, 0)).not.toBeNull()
   const limited = await reserveContinuation("ses_1", 1, 0)
   expect(limited?.status).toBe("usageLimited")
-  expect(limited?.budgetWrapupSent).toBe(true)
+  // The wrap-up is reserved as a pending attempt and stays unsent until the
+  // prompt is confirmed delivered.
+  expect(limited?.budgetWrapupSent).toBe(false)
+  expect((await getGoalInternal("ses_1"))?.pendingAttempt?.kind).toBe("wrapup")
+  expect((await getGoalInternal("ses_1"))?.pendingAttempt?.delivered).toBe(false)
+  expect((await getGoalInternal("ses_1"))?.pendingAttempt?.committed).toBe(false)
+  expect((await getGoalInternal("ses_1"))?.autoTurns).toBe(1)
+  // A duplicate reservation is rejected while the wrap-up is in flight.
+  expect(await reserveContinuation("ses_1", 1, 0)).toBeNull()
+  const sent = await recordContinuationResult("ses_1", "success", 3)
+  expect(sent?.budgetWrapupSent).toBe(true)
+  expect(sent?.status).toBe("usageLimited")
+  expect(sent?.stopReason).toContain("max auto-continues reached")
+  expect((await getGoalInternal("ses_1"))?.pendingAttempt?.delivered).toBe(true)
+  // Once confirmed sent, no further wrap-up reservation is possible.
   expect(await reserveContinuation("ses_1", 1, 0)).toBeNull()
   expect((await getGoal("ses_1"))?.status).toBe("usageLimited")
+})
+
+test("rolling back an undelivered wrapup clears it without refunding an auto-turn", async () => {
+  await createGoal("ses_1", "continue", null)
+  await reserveContinuation("ses_1", 1, 0)
+  const limited = await reserveContinuation("ses_1", 1, 0)
+  expect(limited?.status).toBe("usageLimited")
+  const goalID = (await getGoal("ses_1"))!.id
+  const attemptID = (await getGoalInternal("ses_1"))!.pendingAttempt!.id!
+
+  expect(await rollbackContinuationAttempt("ses_1", { goalID, attemptID })).toBe(true)
+  const after = await getGoalInternal("ses_1")
+  expect(after?.pendingAttempt).toBeNull()
+  // The wrapup consumed no auto-turn, so nothing is refunded and the
+  // continuation clock / progress gating stay untouched.
+  expect(after?.autoTurns).toBe(1)
+  expect(after?.lastContinuationAt).toBe(limited?.lastContinuationAt)
+  expect(after?.awaitingContinuationProgress).toBe(false)
+  expect(after?.updatedAt).toBeGreaterThanOrEqual(limited!.updatedAt)
+  expect(after?.budgetWrapupSent).toBe(false)
+  // The handoff can be reserved again after the rollback.
+  const reserved = await reserveContinuation("ses_1", 1, 0)
+  expect(reserved?.pendingAttempt?.kind).toBe("wrapup")
+})
+
+test("wrapup failures have their own cap and never disturb the limit outcome", async () => {
+  await createGoal("ses_1", "continue", null)
+  await reserveContinuation("ses_1", 1, 0)
+  const limited = await reserveContinuation("ses_1", 1, 0)
+  expect(limited?.status).toBe("usageLimited")
+
+  // First failed handoff keeps the limit state and allows one more retry.
+  const failedOnce = await recordContinuationResult("ses_1", "failure", 5, {
+    requirePending: true,
+  })
+  expect(failedOnce?.status).toBe("usageLimited")
+  expect(failedOnce?.budgetWrapupSent).toBe(false)
+  expect(failedOnce?.continuationFailures).toBe(0)
+  expect((await getGoalInternal("ses_1"))?.wrapupFailures).toBe(1)
+  expect(await reserveContinuation("ses_1", 1, 0, 2)).not.toBeNull()
+
+  // Second failure hits the explicit cap of 2: automatic retries stop while
+  // the limited reason/status stay exactly as they were.
+  const failedTwice = await recordContinuationResult("ses_1", "failure", 5)
+  expect(failedTwice?.status).toBe("usageLimited")
+  expect((await getGoalInternal("ses_1"))?.wrapupFailures).toBe(2)
+  expect(await reserveContinuation("ses_1", 1, 0, 2)).toBeNull()
+  const capped = await getGoalInternal("ses_1")
+  expect(capped?.stopReason).toBe(limited?.stopReason)
+  expect(capped?.budgetWrapupSent).toBe(false)
+
+  // The default cap is 3 when reserveContinuation gets no explicit limit.
+  await createGoal("ses_2", "default cap", null)
+  await reserveContinuation("ses_2", 1, 0)
+  await reserveContinuation("ses_2", 1, 0)
+  for (let i = 0; i < 3; i++) {
+    await recordContinuationResult("ses_2", "failure", 5)
+    if (i < 2) expect(await reserveContinuation("ses_2", 1, 0)).not.toBeNull()
+  }
+  expect((await getGoalInternal("ses_2"))?.wrapupFailures).toBe(3)
+  expect(await reserveContinuation("ses_2", 1, 0)).toBeNull()
+})
+
+test("wrapup attempts and results are protected by identity", async () => {
+  await createGoal("ses_1", "continue", null)
+  await reserveContinuation("ses_1", 1, 0)
+  await reserveContinuation("ses_1", 1, 0)
+  const attempt = (await getGoalInternal("ses_1"))?.pendingAttempt
+  expect(attempt?.kind).toBe("wrapup")
+
+  // A mismatched rollback identity never clears the live wrapup.
+  expect(await rollbackContinuationAttempt("ses_1", { goalID: "goal_wrong" })).toBe(false)
+  expect(await rollbackContinuationAttempt("ses_1", { attemptID: "attempt_wrong" })).toBe(false)
+  expect((await getGoalInternal("ses_1"))?.pendingAttempt?.id).toBe(attempt?.id)
+
+  // A mismatched result identity returns null without touching counters.
+  expect(
+    await recordContinuationResult("ses_1", "failure", 5, { expectedAttemptID: "attempt_wrong" }),
+  ).toBeNull()
+  expect((await getGoalInternal("ses_1"))?.wrapupFailures).toBe(0)
+
+  // A failure after the handoff was delivered is a stale no-op.
+  const goalID = (await getGoal("ses_1"))!.id
+  const sent = await recordContinuationResult("ses_1", "success", 5, {
+    expectedGoalID: goalID,
+    expectedAttemptID: attempt?.id,
+  })
+  expect(sent?.budgetWrapupSent).toBe(true)
+  const stale = await recordContinuationResult("ses_1", "failure", 5)
+  expect(stale?.wrapupFailures).toBe(0)
+  expect(stale?.pendingAttempt?.delivered).toBe(true)
+  expect(stale?.status).toBe("usageLimited")
+})
+
+test("failed step observations never reset pending attempts, failures or no-progress", async () => {
+  await createGoal("ses_1", "continue", { noProgressTokenThreshold: 50, maxNoProgressTurns: 2 })
+  await recordAssistantProgress("ses_1", { messageID: "m0", text: "Working", outputTokens: 100 })
+  await reserveContinuation("ses_1", 10, 0)
+  await recordContinuationResult("ses_1", "failure", 5)
+  await reserveContinuation("ses_1", 10, 0)
+  await recordContinuationResult("ses_1", "success", 5)
+
+  const before = await getGoalInternal("ses_1")
+  expect(before?.pendingAttempt?.delivered).toBe(true)
+  expect(before?.continuationFailures).toBe(1)
+  expect(before?.awaitingContinuationProgress).toBe(true)
+
+  // The failed step's partial text is recorded as identity, but it must not
+  // prove transport health: nothing is reset and no-progress is not consumed.
+  const failed = await recordAssistantProgress("ses_1", {
+    messageID: "m1",
+    text: "Partial output before the step failed",
+    outputTokens: 10,
+    failedStep: true,
+    evaluateContinuation: true,
+  })
+  expect((await getGoalInternal("ses_1"))?.pendingAttempt?.id).toBe(before?.pendingAttempt?.id)
+  expect(failed?.continuationFailures).toBe(1)
+  expect(failed?.awaitingContinuationProgress).toBe(true)
+  expect(failed?.noProgressTurns).toBe(0)
+
+  // The same substantive output from a successful step resolves the attempt.
+  const succeeded = await recordAssistantProgress("ses_1", {
+    messageID: "m2",
+    text: "Recovered and completed the work",
+    outputTokens: 400,
+  })
+  expect((await getGoalInternal("ses_1"))?.pendingAttempt).toBeNull()
+  expect(succeeded?.continuationFailures).toBe(0)
 })
 
 test("resuming after the auto-turn limit starts a fresh continuation window", async () => {

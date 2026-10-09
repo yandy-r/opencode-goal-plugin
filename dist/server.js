@@ -484,6 +484,8 @@ var MAX_ARCHIVED_GOALS_TOTAL = 200;
 var MAX_ARCHIVED_OBJECTIVE_CHARS = 2000;
 var MAX_ARCHIVED_HISTORY_ENTRIES = 20;
 var CHECKPOINT_CHAR_LIMIT = 280;
+var STALE_PENDING_MS = 30000;
+var DEFAULT_MAX_WRAPUP_FAILURES = 3;
 var DEFAULT_NO_PROGRESS_TOKEN_THRESHOLD = 50;
 var DEFAULT_MAX_NO_PROGRESS_TURNS = 2;
 var MAX_AUTO_CONTINUES_STOP_REASON_PREFIX = "max auto-continues reached (";
@@ -507,7 +509,8 @@ var PendingAttemptSchema = Schema.Struct({
   delivered: Schema.Boolean,
   committed: Schema.Boolean,
   armNoProgress: Schema.Boolean,
-  previousLastContinuationAt: Schema.NullOr(Schema.Number)
+  previousLastContinuationAt: Schema.NullOr(Schema.Number),
+  kind: Schema.optional(Schema.Literal("continue", "wrapup"))
 });
 var UsageTrackerSchema = Schema.Struct({
   baseline: Schema.optionalWith(Schema.Unknown, { default: () => null }),
@@ -537,6 +540,7 @@ var GoalSchema = Schema.Struct({
   autoTurns: Schema.Number,
   lastContinuationAt: NullableNumber,
   continuationFailures: Schema.optionalWith(Schema.Number, { default: () => 0 }),
+  wrapupFailures: Schema.optionalWith(Schema.Number, { default: () => 0 }),
   pendingAttempt: Schema.optionalWith(Schema.NullOr(PendingAttemptSchema), { default: () => null }),
   lastStatus: Schema.optionalWith(NullableString, { default: () => null }),
   maxAutoTurns: Schema.optionalWith(NullableNumber, { default: () => null }),
@@ -826,6 +830,7 @@ function normalizeGoal(goal) {
   goal.elapsedPaused = goal.elapsedPaused === true;
   goal.lastContinuationAt = typeof goal.lastContinuationAt === "number" && Number.isFinite(goal.lastContinuationAt) ? Math.floor(goal.lastContinuationAt >= 1000000000000 ? goal.lastContinuationAt / 1000 : goal.lastContinuationAt) : null;
   goal.pendingAttempt = normalizePendingAttempt(goal.pendingAttempt);
+  goal.wrapupFailures = nonNegativeInteger(goal.wrapupFailures, 0);
   goal.continuationBaselineMessageID ??= "";
   goal.continuationBaselineSummary ??= "";
   goal.noProgressTurns = nonNegativeInteger(goal.noProgressTurns, 0);
@@ -870,7 +875,8 @@ function normalizePendingAttempt(attempt) {
     delivered: attempt.delivered === true,
     committed: attempt.committed === true,
     armNoProgress: attempt.armNoProgress !== false,
-    previousLastContinuationAt: typeof attempt.previousLastContinuationAt === "number" && Number.isFinite(attempt.previousLastContinuationAt) ? attempt.previousLastContinuationAt : null
+    previousLastContinuationAt: typeof attempt.previousLastContinuationAt === "number" && Number.isFinite(attempt.previousLastContinuationAt) ? attempt.previousLastContinuationAt : null,
+    ...attempt.kind === "wrapup" ? { kind: "wrapup" } : {}
   };
 }
 function randomId() {
@@ -966,7 +972,11 @@ function snapshot(goal) {
   };
 }
 function snapshotInternal(goal) {
-  return { ...snapshot(goal), pendingAttempt: goal.pendingAttempt };
+  return {
+    ...snapshot(goal),
+    pendingAttempt: goal.pendingAttempt,
+    wrapupFailures: goal.wrapupFailures
+  };
 }
 async function getGoal(sessionID) {
   const state = await readState();
@@ -984,6 +994,10 @@ async function getGoalHistory(sessionID) {
 async function getActiveGoalSessions() {
   const state = await readState();
   return Object.values(state.goals).filter((goal) => goal.status === "active").map((goal) => ({ sessionID: goal.sessionID, id: goal.id }));
+}
+async function getPendingWrapupSessions() {
+  const state = await readState();
+  return Object.values(state.goals).filter((goal) => (goal.status === "budgetLimited" || goal.status === "usageLimited") && !goal.budgetWrapupSent && goal.pendingAttempt?.kind === "wrapup" && !goal.pendingAttempt.delivered).map((goal) => goal.sessionID);
 }
 async function getAllGoals() {
   const state = await readState();
@@ -1036,6 +1050,7 @@ function createGoalRecord(sessionID, objective, normalizedOptions, now = nowSeco
     autoTurns: 0,
     lastContinuationAt: null,
     continuationFailures: 0,
+    wrapupFailures: 0,
     pendingAttempt: null,
     lastStatus: paused ? "Goal recorded from Plan mode; execution paused until resumed from Build mode." : "Goal set.",
     maxAutoTurns: normalizedOptions.maxAutoTurns,
@@ -1171,6 +1186,7 @@ async function updateGoalObjective(sessionID, objective, status = "active", opti
     goal.closedAt = null;
     goal.stopReason = planModePause ? PLAN_MODE_STOP_REASON : null;
     goal.budgetWrapupSent = false;
+    goal.wrapupFailures = 0;
     if (goal.status === "active") {
       goal.continuationFailures = 0;
       if (goal.waitingForHuman !== true) {
@@ -1263,6 +1279,7 @@ async function setGoalStatus(sessionID, status, agent, options) {
     goal.noProgressTurns = status === "active" ? 0 : goal.noProgressTurns;
     goal.stopReason = status === "active" ? null : "paused";
     goal.budgetWrapupSent = status === "active" ? false : goal.budgetWrapupSent;
+    goal.wrapupFailures = status === "active" ? 0 : goal.wrapupFailures;
     goal.blocker = status === "active" ? null : goal.blocker;
     if (agentValue)
       goal.lastPromptAgent = agentValue;
@@ -1527,7 +1544,7 @@ async function recordAssistantProgress(sessionID, input) {
       goal.lastAssistantText = text;
     if (messageID)
       goal.lastAssistantMessageID = messageID;
-    if (substantive && summary && (!repeatedMessage || changed)) {
+    if (input.failedStep !== true && substantive && summary && (!repeatedMessage || changed)) {
       const attempt = goal.pendingAttempt;
       if (attempt == null || input.completedAt == null || input.completedAt >= attempt.reservedAt) {
         goal.continuationFailures = 0;
@@ -1535,7 +1552,7 @@ async function recordAssistantProgress(sessionID, input) {
       }
     }
     const attemptForCompletion = goal.pendingAttempt;
-    const continuationTurnCompleted = input.evaluateContinuation === true && goal.waitingForHuman !== true && goal.awaitingContinuationProgress && Boolean(messageID) && messageID !== goal.continuationBaselineMessageID && (input.completedAt == null || attemptForCompletion == null || input.completedAt >= attemptForCompletion.reservedAt);
+    const continuationTurnCompleted = input.failedStep !== true && input.evaluateContinuation === true && goal.waitingForHuman !== true && goal.awaitingContinuationProgress && Boolean(messageID) && messageID !== goal.continuationBaselineMessageID && (input.completedAt == null || attemptForCompletion == null || input.completedAt >= attemptForCompletion.reservedAt);
     if (continuationTurnCompleted) {
       goal.awaitingContinuationProgress = false;
       goal.pendingAttempt = null;
@@ -1563,7 +1580,7 @@ async function recordAssistantProgress(sessionID, input) {
     return snapshot(goal);
   });
 }
-async function reserveContinuation(sessionID, maxAutoTurns, minIntervalSeconds) {
+async function reserveContinuation(sessionID, maxAutoTurns, minIntervalSeconds, maxWrapupFailures) {
   return mutate((state) => {
     const goal = state.goals[sessionID];
     if (!goal)
@@ -1571,13 +1588,13 @@ async function reserveContinuation(sessionID, maxAutoTurns, minIntervalSeconds) 
     if (goal.waitingForHuman === true)
       return null;
     if (goal.status === "budgetLimited" || goal.status === "usageLimited")
-      return reserveWrapup(goal);
+      return reserveWrapup(goal, maxWrapupFailures);
     if (!canContinue(goal.status))
       return null;
     const now = nowSeconds();
     accountWallClock(goal, now);
     if (maybeStopForUsageLimit(goal, maxAutoTurns, now))
-      return reserveWrapup(goal);
+      return reserveWrapup(goal, maxWrapupFailures);
     if (goal.lastContinuationAt && now - goal.lastContinuationAt < minIntervalSeconds)
       return null;
     goal.autoTurns += 1;
@@ -1611,6 +1628,13 @@ async function rollbackContinuationAttempt(sessionID, expected) {
     const attempt = goal.pendingAttempt;
     if (expected?.attemptID && attempt?.id !== expected.attemptID)
       return false;
+    if (attempt?.kind === "wrapup") {
+      if (attempt.delivered)
+        return false;
+      goal.pendingAttempt = null;
+      goal.updatedAt = nowSeconds();
+      return true;
+    }
     if (!attempt || attempt.delivered || !attempt.committed) {
       if (attempt && !attempt.delivered)
         goal.pendingAttempt = null;
@@ -1636,8 +1660,21 @@ async function recordContinuationResult(sessionID, result, maxFailures, options)
     if (options?.expectedAttemptID && goal.pendingAttempt?.id !== options.expectedAttemptID)
       return null;
     const now = nowSeconds();
+    const wrapup = goal.pendingAttempt?.kind === "wrapup" && isLimited(goal.status);
+    if (isLimited(goal.status) && !wrapup)
+      return snapshotInternal(goal);
+    if (wrapup && goal.pendingAttempt?.delivered)
+      return snapshotInternal(goal);
     goal.updatedAt = now;
     if (result === "success") {
+      if (wrapup && goal.pendingAttempt) {
+        goal.pendingAttempt.delivered = true;
+        goal.budgetWrapupSent = true;
+        goal.wrapupFailures = 0;
+        goal.lastStatus = "Final handoff prompt sent.";
+        pushHistory(goal, "limited", `${goal.status}: ${goal.stopReason ?? "goal limit reached"}; requested final handoff.`);
+        return snapshotInternal(goal);
+      }
       if (goal.status === "active") {
         const attempt = goal.pendingAttempt;
         if (attempt) {
@@ -1666,6 +1703,17 @@ async function recordContinuationResult(sessionID, result, maxFailures, options)
     }
     if (options?.requirePending && goal.pendingAttempt == null)
       return null;
+    if (wrapup) {
+      goal.pendingAttempt = null;
+      goal.wrapupFailures += 1;
+      goal.lastStatus = `Final handoff failed ${goal.wrapupFailures} time(s).`;
+      pushHistory(goal, "error", goal.lastStatus);
+      if (goal.wrapupFailures >= maxFailures) {
+        goal.lastStatus = `Final handoff not delivered after ${goal.wrapupFailures} failure(s); automatic retries stopped.`;
+        pushHistory(goal, "error", goal.lastStatus);
+      }
+      return snapshotInternal(goal);
+    }
     if (goal.waitingForHuman === true)
       return snapshotInternal(goal);
     goal.continuationFailures += 1;
@@ -1722,13 +1770,35 @@ async function recordToolProgress(sessionID, text, expectedAttemptID) {
     return snapshotInternal(goal);
   });
 }
-function reserveWrapup(goal) {
+function reserveWrapup(goal, maxWrapupFailures) {
   if (goal.budgetWrapupSent)
     return null;
-  goal.budgetWrapupSent = true;
+  const inFlight = goal.pendingAttempt;
+  if (inFlight?.kind === "wrapup" && !inFlight.delivered) {
+    if (Date.now() - inFlight.reservedAt < STALE_PENDING_MS)
+      return null;
+    goal.pendingAttempt = null;
+    goal.wrapupFailures += 1;
+  }
+  if (goal.wrapupFailures >= (maxWrapupFailures ?? DEFAULT_MAX_WRAPUP_FAILURES)) {
+    goal.updatedAt = nowSeconds();
+    return null;
+  }
+  goal.pendingAttempt = {
+    id: randomId(),
+    reservedAt: Date.now(),
+    started: false,
+    delivered: false,
+    committed: false,
+    armNoProgress: false,
+    previousLastContinuationAt: goal.lastContinuationAt,
+    kind: "wrapup"
+  };
   goal.updatedAt = nowSeconds();
-  pushHistory(goal, "limited", `${goal.status}: ${goal.stopReason ?? "goal limit reached"}; requested final handoff.`);
   return snapshotInternal(goal);
+}
+function isLimited(status) {
+  return status === "budgetLimited" || status === "usageLimited";
 }
 function maybeStopForBudget(goal) {
   if (goal.status !== "active")
@@ -2701,7 +2771,6 @@ var SNAPSHOT_IDLE_HOLD_MS = 250;
 var DEFAULT_MAX_TASK_BLOCK_SECONDS = 900;
 var TASK_BLOCK_RETRY_MS = 1000;
 var MAX_TIMER_DELAY_MS = 2147483647;
-var STALE_PENDING_MS = 30000;
 var RETRY_SETTLE_MS = 25;
 var TRANSPORT_ERROR_PATTERN = /\b(?:network|fetch|socket|connect|connection|timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|transport|stream|websocket|offline|internet|request failed|proxy)\b/i;
 var NON_TRANSPORT_TERMINAL_PATTERN = /\b(?:abort(?:ed)?|interrupt(?:ed|ion)?)\b/i;
@@ -2727,7 +2796,7 @@ function isUserAbortEvent(event) {
   return event.type === "message.updated" && isRecord(message) && message.role === "assistant" && isRecord(message.error) && message.error.name === "MessageAbortedError";
 }
 function continuationStillReserved(goal, current) {
-  return current?.id === goal.id && current.status === goal.status && (goal.status !== "active" || current.pendingAttempt?.id === goal.pendingAttempt?.id);
+  return current?.id === goal.id && current.status === goal.status && (goal.status === "active" || goal.pendingAttempt?.kind === "wrapup" ? current.pendingAttempt?.id === goal.pendingAttempt?.id : true);
 }
 function restrictedAgentSet(options) {
   if (options?.allow_goal_execution_from_plan === true)
@@ -3711,6 +3780,46 @@ function taskDeferralGoalContinuable(goal) {
     return !goal.budgetWrapupSent;
   return goal.status === "active";
 }
+function limitedGoalOwesWrapup(goal) {
+  if (!goal)
+    return false;
+  if (goal.status !== "budgetLimited" && goal.status !== "usageLimited")
+    return false;
+  if (goal.budgetWrapupSent)
+    return false;
+  const attempt = goal.pendingAttempt;
+  if (attempt?.kind === "wrapup" && !attempt.delivered) {
+    return Date.now() - attempt.reservedAt >= STALE_PENDING_MS;
+  }
+  return true;
+}
+function freshWrapupWakeDelayMs(goal, maxFailures) {
+  if (!goal || goal.budgetWrapupSent || goal.wrapupFailures >= maxFailures)
+    return null;
+  if (goal.status !== "budgetLimited" && goal.status !== "usageLimited")
+    return null;
+  const attempt = goal.pendingAttempt;
+  if (attempt?.kind !== "wrapup" || attempt.delivered)
+    return null;
+  return Math.max(0, attempt.reservedAt + STALE_PENDING_MS - Date.now());
+}
+function shouldRetryWrapup(afterFailure, maxFailures) {
+  if (!afterFailure)
+    return false;
+  if (!limitedGoalOwesWrapup(afterFailure))
+    return false;
+  return afterFailure.wrapupFailures < maxFailures;
+}
+async function settleUncurrentDelivery(sessionID, goal, goalID, attemptID) {
+  if (goal.pendingAttempt?.kind === "wrapup" && goalID && attemptID) {
+    await recordContinuationResult(sessionID, "success", 1, {
+      expectedGoalID: goalID,
+      expectedAttemptID: attemptID
+    });
+    return;
+  }
+  await rollbackContinuationAttempt(sessionID, { goalID, attemptID });
+}
 function existingGoalResult(goal, requestedObjective, planningOnly, services) {
   const reused = goal.objective === requestedObjective;
   return JSON.stringify({
@@ -4030,7 +4139,7 @@ var server = async ({ client }, options) => {
           return;
         if (purpose === "retry") {
           const goal = await getGoalInternal(sessionID);
-          if (!goal || goal.continuationFailures === 0 && goal.pendingAttempt == null)
+          if (!goal || goal.continuationFailures === 0 && goal.wrapupFailures === 0 && goal.pendingAttempt == null)
             return;
         }
         if (scheduledContinuations.get(sessionID) !== scheduled || nativeRetrySessions.has(sessionID))
@@ -4063,6 +4172,7 @@ var server = async ({ client }, options) => {
     let attemptReservedAt = Date.now();
     let attemptGoalID;
     let attemptID;
+    let attemptWrapup = false;
     try {
       const latestAssistant = await fetchLatestAssistant(client, sessionID);
       if (!isCurrent())
@@ -4134,12 +4244,17 @@ var server = async ({ client }, options) => {
         return;
       if (!isCurrent() || nativeRetrySessions.has(sessionID))
         return;
-      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval);
-      if (!goal)
+      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval, maxPromptFailures);
+      if (!goal) {
+        const wrapupWake = freshWrapupWakeDelayMs(await getGoalInternal(sessionID), maxPromptFailures);
+        if (wrapupWake != null)
+          scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null);
         return;
+      }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now();
       attemptGoalID = goal.id;
       attemptID = goal.pendingAttempt?.id;
+      attemptWrapup = goal.pendingAttempt?.kind === "wrapup";
       const beforeDelivery = await getGoalInternal(sessionID);
       if (!isCurrent() || !continuationStillReserved(goal, beforeDelivery) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID)) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
@@ -4151,11 +4266,12 @@ var server = async ({ client }, options) => {
       }
       await sendContinuation(client, sessionID, goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale), goal.lastPromptAgent ?? latestTurnAgent ?? null);
       if (!lifecycleCurrent()) {
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+        await settleUncurrentDelivery(sessionID, goal, attemptGoalID, attemptID);
         return;
       }
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
-        expectedGoalID: attemptGoalID
+        expectedGoalID: attemptGoalID,
+        ...goal.pendingAttempt?.kind === "wrapup" ? { expectedAttemptID: attemptID } : {}
       });
       if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID);
@@ -4172,9 +4288,14 @@ var server = async ({ client }, options) => {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID
         });
-        if (autoContinue && afterFailure?.status === "active") {
+        if (autoContinue && (afterFailure?.status === "active" || shouldRetryWrapup(afterFailure, maxPromptFailures))) {
           scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt), true, "retry");
         }
+      } else if (attemptWrapup) {
+        await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+          expectedGoalID: attemptGoalID,
+          expectedAttemptID: attemptID
+        });
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
       }
@@ -4813,7 +4934,7 @@ async function setupV2(context) {
           return;
         if (purpose === "retry") {
           const goal = await getGoalInternal(sessionID);
-          if (!goal || goal.continuationFailures === 0 && goal.pendingAttempt == null)
+          if (!goal || goal.continuationFailures === 0 && goal.wrapupFailures === 0 && goal.pendingAttempt == null)
             return;
         }
         if (scheduledContinuations.get(sessionID) !== scheduled || nativeRetrySessions.has(sessionID))
@@ -4861,6 +4982,7 @@ async function setupV2(context) {
     let attemptReservedAt = Date.now();
     let attemptGoalID;
     let attemptID;
+    let attemptWrapup = false;
     let delivering = false;
     try {
       const latestStep = latestStepBySession.get(sessionID);
@@ -4894,10 +5016,11 @@ async function setupV2(context) {
           noProgressTokenThreshold: positiveIntegerOrNull2(options.no_progress_token_threshold),
           maxNoProgressTurns: positiveIntegerOrNull2(options.max_no_progress_turns),
           evaluateContinuation: true,
-          completedAt: latestStep.completedAt
+          completedAt: latestStep.completedAt,
+          failedStep: latestStep.failed ?? false
         });
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, after);
-        const progressed = Boolean(after && (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") || after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")));
+        const progressed = latestStep.failed !== true && Boolean(after && (after.lastAssistantMessageID !== (beforeProgress?.lastAssistantMessageID ?? "") || after.lastAssistantText !== (beforeProgress?.lastAssistantText ?? "")));
         const queuedAfterProgress = scheduledContinuations.get(sessionID);
         if (progressed && queuedAfterProgress?.purpose !== "settle")
           cancelScheduledContinuation(sessionID);
@@ -4945,17 +5068,21 @@ async function setupV2(context) {
         return;
       if (!isCurrent() || nativeRetrySessions.has(sessionID))
         return;
-      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval);
+      const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval, maxPromptFailures);
       if (!goal) {
         const waiting = await getGoalInternal(sessionID);
         if (waiting?.status === "active" && waiting.pendingAttempt == null && waiting.lastContinuationAt != null && minInterval > 0) {
           scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, waiting.lastContinuationAt), scheduled != null);
         }
+        const wrapupWake = freshWrapupWakeDelayMs(waiting, maxPromptFailures);
+        if (wrapupWake != null)
+          scheduleSettledContinuation(sessionID, wrapupWake, scheduled != null);
         return;
       }
       attemptReservedAt = goal.pendingAttempt?.reservedAt ?? Date.now();
       attemptGoalID = goal.id;
       attemptID = goal.pendingAttempt?.id;
+      attemptWrapup = goal.pendingAttempt?.kind === "wrapup";
       const beforeDelivery = await getGoalInternal(sessionID);
       if (!isCurrent() || !continuationStillReserved(goal, beforeDelivery) || busySessions.has(sessionID) || nativeRetrySessions.has(sessionID)) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
@@ -4969,11 +5096,12 @@ async function setupV2(context) {
       await sendContinuation(sessionID, goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale), goal.lastPromptAgent ?? latestTurnAgent ?? null);
       delivering = false;
       if (!lifecycleCurrent()) {
-        await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+        await settleUncurrentDelivery(sessionID, goal, attemptGoalID, attemptID);
         return;
       }
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
-        expectedGoalID: attemptGoalID
+        expectedGoalID: attemptGoalID,
+        ...goal.pendingAttempt?.kind === "wrapup" ? { expectedAttemptID: attemptID } : {}
       });
       if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered)
         locallyDeliveredPendingSessions.add(sessionID);
@@ -4990,9 +5118,14 @@ async function setupV2(context) {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID
         });
-        if (autoContinue && afterFailure?.status === "active") {
+        if (autoContinue && (afterFailure?.status === "active" || shouldRetryWrapup(afterFailure, maxPromptFailures))) {
           scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt), true, "retry");
         }
+      } else if (attemptWrapup) {
+        await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+          expectedGoalID: attemptGoalID,
+          expectedAttemptID: attemptID
+        });
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         if (delivering && isCurrent() && attemptGoalID != null) {
@@ -5363,20 +5496,17 @@ async function setupV2(context) {
           outputTokens,
           noProgressTokenThreshold: positiveIntegerOrNull2(options.no_progress_token_threshold),
           maxNoProgressTurns: positiveIntegerOrNull2(options.max_no_progress_turns),
-          completedAt: event.created
+          completedAt: event.created,
+          failedStep: true
         });
         await reconcileLocalMarkerAfterProgress(locallyDeliveredPendingSessions, sessionID, afterStep);
-        if (/[\p{L}\p{N}]/u.test(text)) {
-          const scheduled = scheduledContinuations.get(sessionID);
-          if (scheduled?.purpose === "recovery")
-            cancelScheduledContinuation(sessionID);
-        }
         latestStepBySession.set(sessionID, {
           messageID,
           agent: latestStepBySession.get(sessionID)?.agent,
           text,
           outputTokens,
-          completedAt: event.created
+          completedAt: event.created,
+          failed: true
         });
         return;
       }
@@ -5614,6 +5744,17 @@ async function setupV2(context) {
   const taskRecoveryComplete = humanRecoverySessions.then(recoverTrackedTasks).catch((error) => {
     v2ErrorLog("Task recovery from transcript failed", error);
   });
+  taskRecoveryComplete.then(async () => {
+    for (const sessionID of await getPendingWrapupSessions()) {
+      if (disposed)
+        return;
+      if (!await ownsSession(sessionID))
+        continue;
+      const wake = freshWrapupWakeDelayMs(await getGoalInternal(sessionID), maxPromptFailures);
+      if (wake != null)
+        scheduleSettledContinuation(sessionID, wake);
+    }
+  }).catch((error) => v2ErrorLog("Wrap-up recovery failed", error));
   const humanRelists = new Map;
   async function relistHumanWaits(sessionID) {
     if (!humanWaits.needsRecovery(sessionID) || disposed)

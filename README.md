@@ -226,7 +226,7 @@ The plugin also uses safety states while keeping the goal available for review o
 - `usageLimited` when an auto-turn or elapsed-time budget is exhausted.
 - `paused` when the user pauses, auto-continue repeatedly fails, or repeated low-progress goal continuation turns are detected. No-progress accounting is scoped to goal continuation turns: each reserved continuation is evaluated once, when its turn completes, and unrelated assistant activity in the session never pauses the goal.
 
-When a safety limit is reached, the plugin sends one wrap-up prompt asking for a concise handoff instead of silently continuing forever.
+When a safety limit is reached, the plugin requests a concise wrap-up handoff instead of silently continuing forever. It retries an unconfirmed handoff up to `max_prompt_failures` times. If OpenCode admits the prompt but the process stops before the plugin records it, the handoff may be sent again after restart.
 
 ## Plan Mode Safety
 
