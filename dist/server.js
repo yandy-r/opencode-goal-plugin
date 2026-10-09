@@ -3324,8 +3324,10 @@ async function createGoalFromTool(input, context, services) {
     throw error;
   }
   await services.initializeUsage?.(context.sessionID);
-  if (goal.status === "active")
+  if (goal.status === "active") {
     services.stopAutonomy?.(context.sessionID, "replace");
+    services.rearmBusyWatchdog?.(context.sessionID);
+  }
   return JSON.stringify(planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal }, null, 2);
 }
 function isClosedGoal(goal) {
@@ -3354,6 +3356,7 @@ async function replaceGoalFromTool(input, context, services) {
     maxObjectiveChars: services.maxObjectiveChars
   });
   services.stopAutonomy?.(context.sessionID, "replace");
+  services.rearmBusyWatchdog?.(context.sessionID);
   await services.initializeUsage?.(context.sessionID);
   return JSON.stringify(planningOnly ? { ...result, plan_mode_notice: services.messages.notices.planModeCreate } : result, null, 2);
 }
@@ -4267,6 +4270,10 @@ async function setupV2(context) {
         stoppedExecutions.delete(sessionID);
       else
         stoppedExecutions.add(sessionID);
+    },
+    rearmBusyWatchdog: (sessionID) => {
+      if (!disposed && busySessions.has(sessionID))
+        armTurnWatchdog(sessionID);
     }
   };
   const registrations = [];
@@ -4339,15 +4346,13 @@ async function setupV2(context) {
       const current = await getGoalInternal(sessionID);
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID))
         return;
-      if (current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuationsV2.has(sessionID))
+      if (!isCurrent() || current?.status !== "active" || isPlanAgent(current.lastPromptAgent) || activeContinuationsV2.has(sessionID))
         return;
       turnWatchdogs.delete(sessionID);
       activeContinuationsV2.add(sessionID);
       claimedContinuation = true;
       claimedGoalID = current.id;
       watchdogRescuedSessions.add(sessionID);
-      if (!isCurrent())
-        return;
       await sendContinuation(sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestStep?.agent ?? null);
       if (!isCurrent())
         return;
