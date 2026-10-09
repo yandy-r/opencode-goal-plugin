@@ -1299,6 +1299,7 @@ type GoalServices = {
   consumeAutoTurnReset: (sessionID: string) => boolean
   initializeUsage?: (sessionID: string) => Promise<void>
   stopAutonomy?: (sessionID: string, mode?: "stop" | "replace") => void
+  rearmBusyWatchdog?: (sessionID: string) => void
   consumeObjectiveEdit?: (
     sessionID: string,
     objective: string,
@@ -1361,7 +1362,14 @@ async function createGoalFromTool(
     throw error
   }
   await services.initializeUsage?.(context.sessionID)
-  if (goal.status === "active") services.stopAutonomy?.(context.sessionID, "replace")
+  if (goal.status === "active") {
+    services.stopAutonomy?.(context.sessionID, "replace")
+    // Creating the goal invalidates the continuation epoch, so a busy-turn
+    // watchdog that fired mid-creation bails as stale and deletes itself
+    // without rearming. A session still inside that busy turn must keep its
+    // turn protection: rearm a fresh watchdog under the new epoch.
+    services.rearmBusyWatchdog?.(context.sessionID)
+  }
   return JSON.stringify(
     planningOnly ? { goal, plan_mode_notice: services.messages.notices.planModeCreate } : { goal },
     null,
@@ -1403,6 +1411,9 @@ async function replaceGoalFromTool(
     maxObjectiveChars: services.maxObjectiveChars,
   })
   services.stopAutonomy?.(context.sessionID, "replace")
+  // Same epoch invalidation as creation: a still-busy session keeps a fresh
+  // watchdog even when the old callback is already stale.
+  services.rearmBusyWatchdog?.(context.sessionID)
   await services.initializeUsage?.(context.sessionID)
   return JSON.stringify(
     planningOnly
@@ -2697,6 +2708,9 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       if (mode === "replace") stoppedExecutions.delete(sessionID)
       else stoppedExecutions.add(sessionID)
     },
+    rearmBusyWatchdog: (sessionID) => {
+      if (!disposed && busySessions.has(sessionID)) armTurnWatchdog(sessionID)
+    },
   }
   const registrations: Array<{ dispose(): Promise<void> }> = []
   let disposed = false
@@ -2768,6 +2782,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       const current = await getGoalInternal(sessionID)
       if (turnWatchdogs.get(sessionID) !== watchdog || !busySessions.has(sessionID)) return
       if (
+        !isCurrent() ||
         current?.status !== "active" ||
         isPlanAgent(current.lastPromptAgent) ||
         activeContinuationsV2.has(sessionID)
@@ -2779,7 +2794,6 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       claimedContinuation = true
       claimedGoalID = current.id
       watchdogRescuedSessions.add(sessionID)
-      if (!isCurrent()) return
       await sendContinuation(
         sessionID,
         continuationPrompt(current, locale),
