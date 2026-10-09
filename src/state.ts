@@ -1235,6 +1235,30 @@ export async function pauseGoalForPlanMode(sessionID: string) {
   })
 }
 
+/** Pause an active goal whose continuation prompt was rejected for a non-transport reason. */
+export async function pauseGoalForContinuationError(
+  sessionID: string,
+  detail: string,
+  expectedGoalID?: string,
+) {
+  return mutate((state) => {
+    const goal = state.goals[sessionID]
+    if (!goal || goal.status !== "active") return goal ? snapshot(goal) : null
+    if (expectedGoalID != null && goal.id !== expectedGoalID) return snapshot(goal)
+    accountWallClock(goal)
+    goal.status = "paused"
+    goal.lastAccountedAt = null
+    goal.stopReason = "paused"
+    goal.pendingAttempt = null
+    goal.awaitingContinuationProgress = false
+    goal.blocker = `Auto-continue prompt failed: ${summarizeText(detail, 300)}. Resume the goal to retry.`
+    goal.lastStatus = goal.blocker
+    goal.updatedAt = nowSeconds()
+    pushHistory(goal, "paused", goal.lastStatus)
+    return snapshot(goal)
+  })
+}
+
 export async function setGoalStatus(
   sessionID: string,
   status: MutableGoalStatus,

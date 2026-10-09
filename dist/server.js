@@ -1219,6 +1219,26 @@ async function pauseGoalForPlanMode(sessionID) {
     return snapshot(goal);
   });
 }
+async function pauseGoalForContinuationError(sessionID, detail, expectedGoalID) {
+  return mutate((state) => {
+    const goal = state.goals[sessionID];
+    if (!goal || goal.status !== "active")
+      return goal ? snapshot(goal) : null;
+    if (expectedGoalID != null && goal.id !== expectedGoalID)
+      return snapshot(goal);
+    accountWallClock(goal);
+    goal.status = "paused";
+    goal.lastAccountedAt = null;
+    goal.stopReason = "paused";
+    goal.pendingAttempt = null;
+    goal.awaitingContinuationProgress = false;
+    goal.blocker = `Auto-continue prompt failed: ${summarizeText(detail, 300)}. Resume the goal to retry.`;
+    goal.lastStatus = goal.blocker;
+    goal.updatedAt = nowSeconds();
+    pushHistory(goal, "paused", goal.lastStatus);
+    return snapshot(goal);
+  });
+}
 async function setGoalStatus(sessionID, status, agent, options) {
   const agentValue = typeof agent === "string" && agent.trim() ? agent.trim() : null;
   return mutate((state) => {
@@ -4736,7 +4756,7 @@ async function setupV2(context) {
         return;
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         armNoProgress: false,
-        started: true,
+        started: busySessions.has(sessionID),
         expectedGoalID: claimedGoalID
       });
       if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered) {
@@ -4746,9 +4766,12 @@ async function setupV2(context) {
     } catch (error) {
       try {
         if (claimedContinuation && isCurrent() && isTransportError(error)) {
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+          const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
             expectedGoalID: claimedGoalID
           });
+          if (autoContinue && afterFailure?.status === "active") {
+            scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, Date.now()), true, "retry");
+          }
         }
         v2ErrorLog("Turn watchdog retry failed", error);
       } catch {
@@ -4810,8 +4833,10 @@ async function setupV2(context) {
       return;
     if (busySessions.has(sessionID))
       return;
-    if (activeContinuationsV2.has(sessionID))
+    if (activeContinuationsV2.has(sessionID)) {
+      restartAfterContinuation.add(sessionID);
       return;
+    }
     const epoch = continuationEpochs.current(sessionID);
     const waitRevision = humanWaits.revision(sessionID);
     const lifecycleCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID);
@@ -4823,12 +4848,15 @@ async function setupV2(context) {
     }
     if (!isCurrent() || stoppedExecutions.has(sessionID) || busySessions.has(sessionID))
       return;
-    if (activeContinuationsV2.has(sessionID))
+    if (activeContinuationsV2.has(sessionID)) {
+      restartAfterContinuation.add(sessionID);
       return;
+    }
     activeContinuationsV2.add(sessionID);
     let attemptReservedAt = Date.now();
     let attemptGoalID;
     let attemptID;
+    let delivering = false;
     try {
       const latestStep = latestStepBySession.get(sessionID);
       if (latestStep?.messageID) {
@@ -4932,7 +4960,9 @@ async function setupV2(context) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
       }
+      delivering = true;
       await sendContinuation(sessionID, goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale), goal.lastPromptAgent ?? latestTurnAgent ?? null);
+      delivering = false;
       if (!lifecycleCurrent()) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
@@ -4960,6 +4990,14 @@ async function setupV2(context) {
         }
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
+        if (delivering && isCurrent() && attemptGoalID != null) {
+          const paused = await pauseGoalForContinuationError(sessionID, error instanceof Error ? error.message : String(error), attemptGoalID);
+          if (paused?.id === attemptGoalID && paused.status === "paused") {
+            cancelScheduledContinuation(sessionID);
+            restartAfterContinuation.delete(sessionID);
+            locallyDeliveredPendingSessions.delete(sessionID);
+          }
+        }
       }
       v2ErrorLog("Auto-continue failed", error);
     } finally {
@@ -5195,6 +5233,7 @@ async function setupV2(context) {
       case "session.deleted": {
         if (!sessionID)
           return;
+        restartAfterContinuation.delete(sessionID);
         continuationEpochs.invalidate(sessionID);
         humanWaits.delete(sessionID);
         explicitResumeRequests.delete(sessionID);
