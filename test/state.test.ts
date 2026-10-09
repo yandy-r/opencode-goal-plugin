@@ -26,6 +26,7 @@ import {
   reserveContinuation,
   rollbackContinuationAttempt,
   setGoalStatus,
+  setGoalWaiting,
   updateGoalObjective,
   validateEvidence,
   validateObjective,
@@ -1196,4 +1197,307 @@ test("delayed prior-turn assistant output cannot clear a newer pending attempt",
     completedAt: reservedAt + 10_000,
   })
   expect((await getGoalInternal("ses_1"))?.pendingAttempt).toBeNull()
+})
+
+test("setGoalWaiting freezes the clock across snapshot, usage, and resume", async () => {
+  try {
+    setSystemTime(new Date(100_000))
+    const created = await createGoal("ses_wait", "gate on approval", null)
+    expect(created.waitingForHuman).toBe(false)
+    expect(created.elapsedPaused).toBe(false)
+
+    setSystemTime(new Date(130_000))
+    const waiting = await setGoalWaiting("ses_wait", "deploy the release", true, created.id)
+    expect(waiting).toMatchObject({
+      waitingForHuman: true,
+      elapsedPaused: true,
+      status: "active",
+      lastStatus: "Awaiting approval: deploy the release",
+      timeUsedSeconds: 30,
+    })
+
+    setSystemTime(new Date(190_000))
+    expect((await getGoal("ses_wait"))?.timeUsedSeconds).toBe(30)
+    await accountUsage("ses_wait", 25)
+    expect((await getGoal("ses_wait"))?.timeUsedSeconds).toBe(30)
+
+    const resumed = await setGoalWaiting("ses_wait", null, true, created.id)
+    expect(resumed).toMatchObject({
+      waitingForHuman: false,
+      elapsedPaused: false,
+      status: "active",
+      lastStatus: "Goal resumed.",
+      timeUsedSeconds: 30,
+    })
+    setSystemTime(new Date(200_000))
+    expect((await getGoal("ses_wait"))?.timeUsedSeconds).toBe(40)
+  } finally {
+    setSystemTime()
+  }
+})
+
+test("setGoalWaiting opt-out keeps the clock running while blocking continuation", async () => {
+  try {
+    setSystemTime(new Date(100_000))
+    await createGoal("ses_opt", "count while waiting", null)
+    setSystemTime(new Date(110_000))
+    await setGoalWaiting("ses_opt", "review the diff", false)
+    setSystemTime(new Date(140_000))
+    expect(await getGoal("ses_opt")).toMatchObject({
+      waitingForHuman: true,
+      elapsedPaused: false,
+      timeUsedSeconds: 40,
+    })
+    expect(await reserveContinuation("ses_opt", 10, 0)).toBeNull()
+  } finally {
+    setSystemTime()
+  }
+})
+
+test("waiting blocks limit wrap-up reservation and clear keeps the limit status", async () => {
+  await createGoal("ses_wrap", "wrap while waiting", 10)
+  await setGoalWaiting("ses_wrap", "pick one", true)
+  await accountUsage("ses_wrap", 25)
+  expect((await getGoal("ses_wrap"))?.status).toBe("budgetLimited")
+  expect(await reserveContinuation("ses_wrap", 10, 0)).toBeNull()
+
+  const cleared = await setGoalWaiting("ses_wrap", null, true)
+  expect(cleared).toMatchObject({
+    waitingForHuman: false,
+    elapsedPaused: false,
+    status: "budgetLimited",
+  })
+  expect(cleared?.lastStatus).toContain("wrap-up required")
+})
+
+test("continuation evaluation is skipped while waiting but accounting is kept", async () => {
+  await createGoal("ses_prog", "progress while waiting", null)
+  await recordAssistantProgress("ses_prog", {
+    messageID: "m0",
+    text: "baseline text",
+    outputTokens: 5,
+  })
+  await reserveContinuation("ses_prog", 10, 0)
+  await recordContinuationResult("ses_prog", "success", 3)
+  await setGoalWaiting("ses_prog", "approve", true)
+
+  const waiting = await recordAssistantProgress("ses_prog", {
+    messageID: "m1",
+    text: "still working",
+    outputTokens: 5,
+    evaluateContinuation: true,
+  })
+  expect(waiting).toMatchObject({
+    noProgressTurns: 0,
+    awaitingContinuationProgress: true,
+    lastAssistantText: "still working",
+  })
+
+  await setGoalWaiting("ses_prog", null, true)
+  const resumed = await recordAssistantProgress("ses_prog", {
+    messageID: "m2",
+    text: "new direction taken",
+    outputTokens: 5,
+    evaluateContinuation: true,
+  })
+  expect(resumed).toMatchObject({ awaitingContinuationProgress: false, noProgressTurns: 0 })
+})
+
+test("delivery success, failure, and rollback preserve the waiting presentation", async () => {
+  await createGoal("ses_succ", "keep presentation on success", null)
+  const reserved = await reserveContinuation("ses_succ", 10, 0)
+  await setGoalWaiting("ses_succ", "deploy?", true)
+  const delivered = await recordContinuationResult("ses_succ", "success", 3, {
+    expectedAttemptID: reserved?.pendingAttempt?.id,
+  })
+  expect(delivered?.lastStatus).toBe("Awaiting approval: deploy?")
+
+  await createGoal("ses_roll", "keep presentation on rollback", null)
+  const pending = await reserveContinuation("ses_roll", 10, 0)
+  await setGoalWaiting("ses_roll", "ok?", true)
+  expect(
+    await rollbackContinuationAttempt("ses_roll", {
+      attemptID: pending?.pendingAttempt?.id,
+    }),
+  ).toBe(true)
+  expect((await getGoal("ses_roll"))?.lastStatus).toBe("Awaiting approval: ok?")
+  await reserveContinuation("ses_roll", 10, 0)
+  await recordContinuationResult("ses_roll", "failure", 3)
+  expect((await getGoal("ses_roll"))?.lastStatus).toBe("Awaiting approval: ok?")
+})
+
+test("setGoalWaiting identity guard, no-goal, repeated updates, and close reset", async () => {
+  expect(await setGoalWaiting("ses_none", "x", true)).toBeNull()
+
+  await createGoal("ses_guard", "guard identity", null)
+  const goal = await getGoal("ses_guard")
+  expect(await setGoalWaiting("ses_guard", "x", true, "wrong-id")).toBeNull()
+  expect((await getGoal("ses_guard"))?.waitingForHuman).toBe(false)
+
+  const first = await setGoalWaiting("ses_guard", "deploy", true, goal?.id)
+  const second = await setGoalWaiting("ses_guard", "deploy", true, goal?.id)
+  expect(second?.history).toEqual(first?.history)
+  expect((await setGoalWaiting("ses_guard", "ship", true))?.lastStatus).toBe(
+    "Awaiting approval: ship",
+  )
+  expect(await setGoalWaiting("ses_guard", "  ", true)).toMatchObject({
+    lastStatus: "Waiting for user input.",
+    waitingForHuman: true,
+  })
+
+  expect(await completeGoal("ses_guard", "done")).toMatchObject({
+    waitingForHuman: false,
+    elapsedPaused: false,
+    lastStatus: "Goal completed.",
+  })
+})
+
+test("setGoalWaiting ignores paused goals", async () => {
+  await createGoal("ses_pause", "pause gate", null)
+  await setGoalStatus("ses_pause", "paused")
+  expect(await setGoalWaiting("ses_pause", "x", true)).toMatchObject({
+    waitingForHuman: false,
+    status: "paused",
+    lastStatus: "Goal paused.",
+  })
+})
+
+test.each(["Awaiting approval: deploy the release", "Waiting for user input."])(
+  "setGoalWaiting preserves canonical status %s",
+  async (status) => {
+    await createGoal("ses_canonical", "canonical gate", null)
+    expect((await setGoalWaiting("ses_canonical", status, true))?.lastStatus).toBe(status)
+  },
+)
+
+test("waiting failure at threshold one preserves accepted attempt and history", async () => {
+  const goal = await createGoal("ses_failure_wait", "accepted human gate", null)
+  const reserved = await reserveContinuation("ses_failure_wait", 10, 0)
+  await recordContinuationResult("ses_failure_wait", "success", 1, {
+    expectedAttemptID: reserved?.pendingAttempt?.id,
+    started: true,
+  })
+  await setGoalWaiting("ses_failure_wait", "approve deployment", true)
+  const before = await getGoalInternal("ses_failure_wait")
+  const failed = await recordContinuationResult("ses_failure_wait", "failure", 1, {
+    expectedGoalID: goal.id,
+    expectedAttemptID: reserved?.pendingAttempt?.id,
+    requirePending: true,
+  })
+  expect(failed).toMatchObject({
+    status: "active",
+    continuationFailures: 0,
+    awaitingContinuationProgress: true,
+    waitingForHuman: true,
+    elapsedPaused: true,
+    lastStatus: "Awaiting approval: approve deployment",
+  })
+  expect(failed?.pendingAttempt).toEqual(before?.pendingAttempt)
+  expect(failed?.history).toEqual(before?.history)
+  expect(failed?.history.some((entry) => entry.type === "error" || entry.type === "paused")).toBe(
+    false,
+  )
+})
+
+test.each([true, false])(
+  "resume and objective edit preserve human wait (freeze=%s)",
+  async (freeze) => {
+    try {
+      setSystemTime(new Date(100_000))
+      await createGoal("ses_resume_wait", "keep waiting", null)
+      await reserveContinuation("ses_resume_wait", 10, 0)
+      await recordContinuationResult("ses_resume_wait", "success", 1)
+      setSystemTime(new Date(110_000))
+      await setGoalWaiting("ses_resume_wait", "approve deployment", freeze)
+      const attempt = (await getGoalInternal("ses_resume_wait"))?.pendingAttempt
+      await setGoalStatus("ses_resume_wait", "paused")
+      setSystemTime(new Date(140_000))
+      const resumed = await setGoalStatus("ses_resume_wait", "active")
+      expect(resumed).toMatchObject({
+        status: "active",
+        waitingForHuman: true,
+        elapsedPaused: freeze,
+        timeUsedSeconds: 10,
+        lastStatus: "Awaiting approval: approve deployment",
+      })
+      expect((await getGoalInternal("ses_resume_wait"))?.pendingAttempt).toEqual(attempt)
+      setSystemTime(new Date(150_000))
+      const edited = await updateGoalObjective(
+        "ses_resume_wait",
+        "edited but still waiting",
+        "active",
+      )
+      expect(edited).toMatchObject({
+        status: "active",
+        waitingForHuman: true,
+        elapsedPaused: freeze,
+        timeUsedSeconds: freeze ? 10 : 20,
+        lastStatus: "Awaiting approval: approve deployment",
+      })
+      expect((await getGoalInternal("ses_resume_wait"))?.pendingAttempt).toEqual(attempt)
+      setSystemTime(new Date(160_000))
+      expect((await getGoal("ses_resume_wait"))?.timeUsedSeconds).toBe(freeze ? 10 : 30)
+      expect(await reserveContinuation("ses_resume_wait", 10, 0)).toBeNull()
+      await setGoalWaiting("ses_resume_wait", null, freeze)
+      setSystemTime(new Date(170_000))
+      expect((await getGoal("ses_resume_wait"))?.timeUsedSeconds).toBe(freeze ? 20 : 40)
+    } finally {
+      setSystemTime()
+    }
+  },
+)
+
+test("clearing a human wait preserves newer active and paused status", async () => {
+  await createGoal("ses_new_status", "new status survives", null)
+  await setGoalWaiting("ses_new_status", "approve", true)
+  const file = process.env.OPENCODE_GOAL_STATE_PATH!
+  const raw = JSON.parse(await readFile(file, "utf8")) as {
+    goals: Record<string, Record<string, unknown>>
+  }
+  raw.goals.ses_new_status!.lastStatus = "Newer plugin status."
+  await writeFile(file, JSON.stringify(raw), "utf8")
+  const before = await getGoal("ses_new_status")
+  const cleared = await setGoalWaiting("ses_new_status", null, true)
+  expect(cleared?.lastStatus).toBe("Newer plugin status.")
+  expect(cleared?.history).toEqual(before?.history)
+
+  await setGoalWaiting("ses_new_status", "approve", true)
+  await setGoalStatus("ses_new_status", "paused")
+  expect(await setGoalWaiting("ses_new_status", null, true)).toMatchObject({
+    status: "paused",
+    lastStatus: "Goal paused.",
+    waitingForHuman: false,
+    elapsedPaused: false,
+  })
+})
+
+test("stale identity clear cannot release replacement goal's human gate", async () => {
+  const old = await createGoal("ses_stale_clear", "old goal", null)
+  await setGoalWaiting("ses_stale_clear", "old approval", true, old.id)
+  const replacement = await replaceGoal("ses_stale_clear", "replacement goal", null)
+  await setGoalWaiting("ses_stale_clear", "new approval", true, replacement.goal.id)
+  const before = await getGoal("ses_stale_clear")
+  expect(await setGoalWaiting("ses_stale_clear", null, true, old.id)).toBeNull()
+  expect(await getGoal("ses_stale_clear")).toMatchObject({
+    id: replacement.goal.id,
+    waitingForHuman: true,
+    elapsedPaused: true,
+    lastStatus: "Awaiting approval: new approval",
+    history: before?.history,
+  })
+})
+
+test("legacy goals without waiting fields default to not waiting", async () => {
+  await createGoal("ses_legacy", "legacy goal", null)
+  const file = process.env.OPENCODE_GOAL_STATE_PATH!
+  const raw = JSON.parse(await readFile(file, "utf8")) as {
+    goals: Record<string, Record<string, unknown>>
+  }
+  delete raw.goals.ses_legacy!.waitingForHuman
+  delete raw.goals.ses_legacy!.elapsedPaused
+  await writeFile(file, JSON.stringify(raw), "utf8")
+  expect(await getGoal("ses_legacy")).toMatchObject({
+    waitingForHuman: false,
+    elapsedPaused: false,
+  })
 })

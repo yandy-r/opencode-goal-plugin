@@ -46,6 +46,8 @@ type GoalSnapshot = {
   closedAt?: number | null
   continuationFailures: number
   lastStatus: string | null
+  waitingForHuman?: boolean
+  elapsedPaused?: boolean
   maxAutoTurns: number | null
   maxDurationSeconds: number | null
   noProgressTokenThreshold: number | null
@@ -397,7 +399,7 @@ function currentEpochSeconds() {
 
 export function liveTimeUsedSeconds(goal: GoalSnapshot, nowSeconds = currentEpochSeconds()) {
   const baseSeconds = Math.max(0, Math.floor(goal.timeUsedSeconds))
-  if (goal.status !== "active") return baseSeconds
+  if (goal.status !== "active" || goal.elapsedPaused === true) return baseSeconds
   if (typeof goal.sampledAt !== "number") return baseSeconds
   return baseSeconds + Math.max(0, Math.floor(nowSeconds - goal.sampledAt))
 }
@@ -445,6 +447,8 @@ function isGoalSnapshot(value: unknown): value is GoalSnapshot {
   if (value.closedAt != null && typeof value.closedAt !== "number") return false
   if (typeof value.continuationFailures !== "number") return false
   if (value.lastStatus != null && typeof value.lastStatus !== "string") return false
+  if (value.waitingForHuman != null && typeof value.waitingForHuman !== "boolean") return false
+  if (value.elapsedPaused != null && typeof value.elapsedPaused !== "boolean") return false
   if (value.maxAutoTurns !== null && typeof value.maxAutoTurns !== "number") return false
   if (value.maxDurationSeconds !== null && typeof value.maxDurationSeconds !== "number")
     return false
@@ -485,7 +489,9 @@ export async function readPersistedGoal(
     const sampledAt = currentEpochSeconds()
     const timeUsedSeconds = typeof stored.timeUsedSeconds === "number" ? stored.timeUsedSeconds : 0
     const activeSeconds =
-      stored.status === "active" && typeof stored.lastAccountedAt === "number"
+      stored.status === "active" &&
+      stored.elapsedPaused !== true &&
+      typeof stored.lastAccountedAt === "number"
         ? Math.max(0, sampledAt - stored.lastAccountedAt)
         : 0
     const tokenBudget = stored.tokenBudget

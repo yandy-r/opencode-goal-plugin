@@ -1731,6 +1731,65 @@ test("zh-CN compaction hook emits a localized, injection-hardened snapshot", asy
   expect(snapshot).not.toContain("Goal paused.")
 })
 
+test("V1 human events gate all requests, ignore unknown events, and clear on final reply", async () => {
+  const calls: unknown[] = []
+  const hooks = await setupServer(
+    {
+      client: {
+        session: {
+          promptAsync: async (input: unknown) => {
+            calls.push(input)
+          },
+        },
+      },
+    } as never,
+    { min_continue_interval_seconds: 0 },
+  )
+  await createGoal("ses_1", "Wait for approval")
+  const send = async (type: string, properties: Record<string, unknown>) =>
+    hooks.event!({ event: { type, properties } as never })
+  await send("permission.updated", { sessionID: "ses_1", id: "p1", permission: "shell" })
+  await send("question.asked", { sessionID: "ses_1", id: "q1" })
+  await send("permission.future", { sessionID: "ses_1", id: "future" })
+  await send("session.idle", { sessionID: "ses_1" })
+  expect(calls).toHaveLength(0)
+  expect((await getGoal("ses_1"))?.waitingForHuman).toBe(true)
+  await send("permission.replied", { sessionID: "ses_1", permissionID: "p1" })
+  expect((await getGoal("ses_1"))?.waitingForHuman).toBe(true)
+  await send("question.rejected", { sessionID: "ses_1", requestID: "q1" })
+  await waitForContinuation(calls)
+  expect((await getGoal("ses_1"))?.waitingForHuman).toBe(false)
+})
+
+test("V1 final reply while paused clears wait before resume", async () => {
+  const hooks = await setupServer({ client: {} } as never, { auto_continue: false })
+  await createGoal("ses_1", "Reply while paused")
+  await hooks.event!({
+    event: {
+      type: "permission.updated",
+      properties: { sessionID: "ses_1", id: "p1", permission: "shell" },
+    } as never,
+  })
+  await setGoalStatus("ses_1", "paused")
+  await hooks.event!({
+    event: {
+      type: "permission.replied",
+      properties: { sessionID: "ses_1", permissionID: "p1" },
+    } as never,
+  })
+  expect(await getGoal("ses_1")).toMatchObject({
+    status: "paused",
+    waitingForHuman: false,
+    elapsedPaused: false,
+  })
+  await setGoalStatus("ses_1", "active")
+  expect(await getGoal("ses_1")).toMatchObject({
+    status: "active",
+    waitingForHuman: false,
+    elapsedPaused: false,
+  })
+})
+
 test("idle event auto-continues active goals when enabled", async () => {
   const calls: unknown[] = []
   const hooks = await setupServer(

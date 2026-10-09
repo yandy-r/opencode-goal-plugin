@@ -133,6 +133,10 @@ export type Goal = {
   lastAssistantMessageID: string
   lastPromptAgent: string | null
   awaitingContinuationProgress: boolean
+  /** Active goal gated on a human answer/approval; blocks continuation. */
+  waitingForHuman?: boolean
+  /** Wall clock frozen while waiting; snapshot and accounting skip the active delta. */
+  elapsedPaused?: boolean
   continuationBaselineMessageID: string
   continuationBaselineSummary: string
 }
@@ -293,6 +297,8 @@ const GoalSchema = Schema.Struct({
   lastAssistantMessageID: Schema.optionalWith(Schema.String, { default: () => "" }),
   lastPromptAgent: Schema.optionalWith(NullableString, { default: () => null }),
   awaitingContinuationProgress: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  waitingForHuman: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  elapsedPaused: Schema.optionalWith(Schema.Boolean, { default: () => false }),
   continuationBaselineMessageID: Schema.optionalWith(Schema.String, { default: () => "" }),
   continuationBaselineSummary: Schema.optionalWith(Schema.String, { default: () => "" }),
 })
@@ -729,6 +735,8 @@ function normalizeGoal(goal: Goal) {
   goal.lastAssistantMessageID ??= ""
   goal.lastPromptAgent ??= null
   goal.awaitingContinuationProgress = goal.awaitingContinuationProgress === true
+  goal.waitingForHuman = goal.waitingForHuman === true
+  goal.elapsedPaused = goal.elapsedPaused === true
   goal.lastContinuationAt =
     typeof goal.lastContinuationAt === "number" && Number.isFinite(goal.lastContinuationAt)
       ? Math.floor(
@@ -865,7 +873,7 @@ export function snapshot(goal: Goal): GoalSnapshot {
   normalizeGoal(goal)
   const sampledAt = nowSeconds()
   const activeSeconds =
-    goal.status === "active" && goal.lastAccountedAt != null
+    goal.status === "active" && goal.elapsedPaused !== true && goal.lastAccountedAt != null
       ? Math.max(0, sampledAt - goal.lastAccountedAt)
       : 0
   const timeUsedSeconds = goal.timeUsedSeconds + activeSeconds
@@ -901,6 +909,8 @@ export function snapshot(goal: Goal): GoalSnapshot {
     lastAssistantMessageID: goal.lastAssistantMessageID,
     lastPromptAgent: goal.lastPromptAgent,
     awaitingContinuationProgress: goal.awaitingContinuationProgress,
+    waitingForHuman: goal.status === "active" && goal.waitingForHuman === true,
+    elapsedPaused: goal.status === "active" && goal.elapsedPaused === true,
     continuationBaselineMessageID: goal.continuationBaselineMessageID,
     continuationBaselineSummary: goal.continuationBaselineSummary,
     autoTurns: goal.autoTurns,
@@ -927,6 +937,14 @@ export async function getGoalHistory(sessionID: string) {
     current: current ? snapshot(current) : null,
     previous: state.archives[sessionID] ?? [],
   }
+}
+
+/** Uncapped session identities for internal startup recovery, not public listing. */
+export async function getActiveGoalSessions() {
+  const state = await readState()
+  return Object.values(state.goals)
+    .filter((goal) => goal.status === "active")
+    .map((goal) => ({ sessionID: goal.sessionID, id: goal.id }))
 }
 
 export async function getAllGoals() {
@@ -1016,6 +1034,8 @@ function createGoalRecord(
     lastAssistantMessageID: "",
     lastPromptAgent: normalizedOptions.agent,
     awaitingContinuationProgress: false,
+    waitingForHuman: false,
+    elapsedPaused: false,
     continuationBaselineMessageID: "",
     continuationBaselineSummary: "",
   }
@@ -1085,6 +1105,8 @@ function cancelGoalRecord(goal: Goal, reason: "cancelled" | "cleared" | "replace
   goal.lastAccountedAt = null
   goal.pendingAttempt = null
   goal.awaitingContinuationProgress = false
+  goal.waitingForHuman = false
+  goal.elapsedPaused = false
   goal.budgetWrapupSent = false
   goal.stopReason = reason
   goal.blocker = null
@@ -1154,7 +1176,8 @@ export async function updateGoalObjective(
     goal.objective = value
     goal.status = planModePause ? "paused" : status
     goal.updatedAt = nowSeconds()
-    goal.lastAccountedAt = goal.status === "active" ? goal.updatedAt : null
+    goal.lastAccountedAt =
+      goal.status === "active" && goal.elapsedPaused !== true ? goal.updatedAt : null
     goal.completionEvidence = null
     goal.blocker = planModePause ? PLAN_MODE_BLOCKER : null
     goal.closedAt = null
@@ -1162,15 +1185,21 @@ export async function updateGoalObjective(
     goal.budgetWrapupSent = false
     if (goal.status === "active") {
       goal.continuationFailures = 0
-      goal.pendingAttempt = null
-      goal.awaitingContinuationProgress = false
+      if (goal.waitingForHuman !== true) {
+        goal.pendingAttempt = null
+        goal.awaitingContinuationProgress = false
+      }
     }
+    // A pending human wait survives an edit/resume; only its clear ends it.
+    const waitingStatus = goal.status === "active" ? currentWaitingStatus(goal) : null
     if (agent) goal.lastPromptAgent = agent
-    goal.lastStatus = planModePause
-      ? "Goal objective updated; execution paused while the session is in Plan mode."
-      : goal.status === "active"
-        ? "Goal objective updated and resumed."
-        : "Goal objective updated and paused."
+    goal.lastStatus = waitingStatus
+      ? waitingStatus
+      : planModePause
+        ? "Goal objective updated; execution paused while the session is in Plan mode."
+        : goal.status === "active"
+          ? "Goal objective updated and resumed."
+          : "Goal objective updated and paused."
     pushHistory(goal, "updated", `Goal objective updated: ${summarizeText(value, 400)}`)
     if (planModePause) pushHistory(goal, "paused", goal.lastStatus)
     return snapshot(goal)
@@ -1228,10 +1257,12 @@ export async function setGoalStatus(
     accountWallClock(goal)
     goal.status = status
     goal.updatedAt = nowSeconds()
-    goal.lastAccountedAt = status === "active" ? goal.updatedAt : null
+    // A pending human wait survives resume; keep a frozen clock frozen.
+    goal.lastAccountedAt =
+      status === "active" && goal.elapsedPaused !== true ? goal.updatedAt : null
     goal.autoTurns = resumesAutoTurnLimit ? 0 : goal.autoTurns
     goal.continuationFailures = status === "active" ? 0 : goal.continuationFailures
-    goal.pendingAttempt = status === "active" ? null : goal.pendingAttempt
+    if (status === "active" && goal.waitingForHuman !== true) goal.pendingAttempt = null
     goal.noProgressTurns = status === "active" ? 0 : goal.noProgressTurns
     goal.stopReason = status === "active" ? null : "paused"
     goal.budgetWrapupSent = status === "active" ? false : goal.budgetWrapupSent
@@ -1239,6 +1270,87 @@ export async function setGoalStatus(
     if (agentValue) goal.lastPromptAgent = agentValue
     goal.lastStatus = status === "active" ? "Goal resumed." : "Goal paused."
     pushHistory(goal, status === "active" ? "resumed" : "paused", goal.lastStatus)
+    if (status === "active") goal.lastStatus = currentWaitingStatus(goal) ?? goal.lastStatus
+    return snapshot(goal)
+  })
+}
+
+const WAITING_FOR_INPUT_STATUS = "Waiting for user input."
+
+const AWAITING_APPROVAL_PREFIX = "Awaiting approval: "
+
+function isWaitingStatus(text: string | null | undefined): text is string {
+  return text === WAITING_FOR_INPUT_STATUS || text?.startsWith(AWAITING_APPROVAL_PREFIX) === true
+}
+
+/** Raw action text or an already-canonical waiting status (kept unchanged). */
+function waitingStatusText(status: string) {
+  if (isWaitingStatus(status)) return status
+  const action = summarizeText(status)
+  return action ? `${AWAITING_APPROVAL_PREFIX}${action}` : WAITING_FOR_INPUT_STATUS
+}
+
+/** Waiting presentation to restore after a resume/edit overwrote lastStatus. */
+function currentWaitingStatus(goal: Goal) {
+  if (goal.waitingForHuman !== true) return null
+  if (isWaitingStatus(goal.lastStatus)) return goal.lastStatus
+  const entry = goal.history.findLast(
+    (item) => item.type === "updated" && isWaitingStatus(item.detail),
+  )
+  return entry?.detail ?? WAITING_FOR_INPUT_STATUS
+}
+
+/**
+ * Enter, update, or leave the human-gate waiting state of the active goal.
+ * Waiting blocks reserveContinuation (including limit wrap-up) and skips the
+ * no-progress continuation evaluation; text/tool/token accounting keeps
+ * running, and token budgets remain enforced while waiting.
+ * With pauseElapsed the wall clock freezes between entry and clear
+ * and resumes at clear; a clear never clobbers a paused/limited/closed status.
+ */
+export async function setGoalWaiting(
+  sessionID: string,
+  status: string | null,
+  pauseElapsed: boolean,
+  expectedGoalID?: string,
+) {
+  const paused = pauseElapsed === true
+  return mutate((state) => {
+    const goal = state.goals[sessionID]
+    if (!goal) return null
+    if (expectedGoalID && goal.id !== expectedGoalID) return null
+    if (status == null) {
+      if (goal.waitingForHuman !== true && goal.elapsedPaused !== true) return snapshot(goal)
+      goal.waitingForHuman = false
+      if (goal.elapsedPaused === true) {
+        goal.elapsedPaused = false
+        if (goal.status === "active") goal.lastAccountedAt = nowSeconds()
+      }
+      if (goal.status === "active" && isWaitingStatus(goal.lastStatus)) {
+        goal.lastStatus = "Goal resumed."
+        pushHistory(goal, "resumed", goal.lastStatus)
+      }
+      goal.updatedAt = nowSeconds()
+      return snapshot(goal)
+    }
+    // Only an active goal presents a waiting status.
+    if (goal.status !== "active") return snapshot(goal)
+    const nextStatus = waitingStatusText(status)
+    const waiting = goal.waitingForHuman === true
+    const frozen = goal.elapsedPaused === true
+    if (waiting && frozen === paused && goal.lastStatus === nextStatus) return snapshot(goal)
+    if (!frozen) accountWallClock(goal) // account elapsed before entry/freeze
+    goal.waitingForHuman = true
+    if (paused) {
+      goal.elapsedPaused = true
+      goal.lastAccountedAt = null
+    } else if (frozen) {
+      goal.elapsedPaused = false
+      goal.lastAccountedAt = nowSeconds()
+    }
+    goal.lastStatus = nextStatus
+    pushHistory(goal, "updated", nextStatus)
+    goal.updatedAt = nowSeconds()
     return snapshot(goal)
   })
 }
@@ -1272,6 +1384,8 @@ export async function closeGoal(
     }
     accountWallClock(goal)
     const now = nowSeconds()
+    goal.waitingForHuman = false
+    goal.elapsedPaused = false
     goal.status = input.status
     goal.updatedAt = now
     goal.closedAt = now
@@ -1525,6 +1639,7 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
     const attemptForCompletion = goal.pendingAttempt
     const continuationTurnCompleted =
       input.evaluateContinuation === true &&
+      goal.waitingForHuman !== true &&
       goal.awaitingContinuationProgress &&
       Boolean(messageID) &&
       messageID !== goal.continuationBaselineMessageID &&
@@ -1580,6 +1695,8 @@ export async function reserveContinuation(
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) return null
+    // A human-gated goal never auto-continues, including limit wrap-up.
+    if (goal.waitingForHuman === true) return null
     if (goal.status === "budgetLimited" || goal.status === "usageLimited")
       return reserveWrapup(goal)
     if (!canContinue(goal.status)) return null
@@ -1637,7 +1754,8 @@ export async function rollbackContinuationAttempt(
     goal.lastContinuationAt = attempt.previousLastContinuationAt
     goal.pendingAttempt = null
     goal.awaitingContinuationProgress = false
-    goal.lastStatus = "Auto-continue attempt canceled before delivery."
+    if (goal.waitingForHuman !== true)
+      goal.lastStatus = "Auto-continue attempt canceled before delivery."
     goal.updatedAt = nowSeconds()
     return true
   })
@@ -1693,7 +1811,7 @@ export async function recordContinuationResult(
           }
           if (goal.pendingAttempt.armNoProgress) goal.awaitingContinuationProgress = true
         }
-        goal.lastStatus = "Auto-continue prompt sent."
+        if (goal.waitingForHuman !== true) goal.lastStatus = "Auto-continue prompt sent."
       }
       return snapshotInternal(goal)
     }
@@ -1701,6 +1819,9 @@ export async function recordContinuationResult(
     // ceiling. requirePending ensures a failure without a pending attempt (e.g.
     // a stray duplicate transport event) is not double-counted.
     if (options?.requirePending && goal.pendingAttempt == null) return null
+    // Human gating is not a transport failure. Keep the accepted attempt so
+    // progress can resolve it after the user answers.
+    if (goal.waitingForHuman === true) return snapshotInternal(goal)
     goal.continuationFailures += 1
     goal.awaitingContinuationProgress = false
     goal.pendingAttempt = null
@@ -1829,7 +1950,7 @@ function maybeStopForUsageLimit(goal: Goal, defaultMaxAutoTurns: number, now = n
 }
 
 function accountWallClock(goal: Goal, now = nowSeconds()) {
-  if (goal.status !== "active") return
+  if (goal.status !== "active" || goal.elapsedPaused === true) return
   if (goal.lastAccountedAt == null) {
     goal.lastAccountedAt = now
     return
