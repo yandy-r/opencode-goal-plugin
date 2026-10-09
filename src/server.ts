@@ -33,6 +33,7 @@ import {
   markPendingContinuationStarted,
   onStateRecovery,
   PLAN_MODE_STOP_REASON,
+  pauseGoalForContinuationError,
   pauseGoalForPlanMode,
   recordAssistantProgress,
   recordContinuationResult,
@@ -2905,12 +2906,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       )
       // Watchdog rescues are untracked retries: a delivered prompt arms the
       // pending-continuation window but never consumes an auto-turn or
-      // no-progress budget (armNoProgress: false). The rescue delivers while
-      // already busy, so the pending attempt is marked started immediately.
+      // no-progress budget (armNoProgress: false). If the original execution
+      // settled during delivery, its deferred idle must not resolve the new
+      // rescue as unanswered before the host starts that prompt.
       if (!lifecycleCurrent()) return
       const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
         armNoProgress: false,
-        started: true,
+        started: busySessions.has(sessionID),
         expectedGoalID: claimedGoalID,
       })
       if (lifecycleCurrent() && delivered?.pendingAttempt?.delivered) {
@@ -2923,9 +2925,22 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           // Watchdog rescues share the same prompt-failure ceiling: recognized
           // transport errors accumulate toward max_prompt_failures without
           // consuming auto-turn budgets.
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
-            expectedGoalID: claimedGoalID,
-          })
+          const afterFailure = await recordContinuationResult(
+            sessionID,
+            "failure",
+            maxPromptFailures,
+            {
+              expectedGoalID: claimedGoalID,
+            },
+          )
+          if (autoContinue && afterFailure?.status === "active") {
+            scheduleSettledContinuation(
+              sessionID,
+              continuationRetryDelayMs(minInterval, Date.now()),
+              true,
+              "retry",
+            )
+          }
         }
         v2ErrorLog("Turn watchdog retry failed", error)
       } catch {
@@ -3002,7 +3017,10 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     if (disposed) return
     if (stoppedExecutions.has(sessionID)) return
     if (busySessions.has(sessionID)) return
-    if (activeContinuationsV2.has(sessionID)) return
+    if (activeContinuationsV2.has(sessionID)) {
+      restartAfterContinuation.add(sessionID)
+      return
+    }
     const epoch = continuationEpochs.current(sessionID)
     const waitRevision = humanWaits.revision(sessionID)
     const lifecycleCurrent = () => !disposed && epoch === continuationEpochs.current(sessionID)
@@ -3020,11 +3038,15 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     }
     if (!isCurrent() || stoppedExecutions.has(sessionID) || busySessions.has(sessionID)) return
     // Detached settlements can both wait on recovery; claim synchronously.
-    if (activeContinuationsV2.has(sessionID)) return
+    if (activeContinuationsV2.has(sessionID)) {
+      restartAfterContinuation.add(sessionID)
+      return
+    }
     activeContinuationsV2.add(sessionID)
     let attemptReservedAt = Date.now()
     let attemptGoalID: string | undefined
     let attemptID: string | undefined
+    let delivering = false
     try {
       const latestStep = latestStepBySession.get(sessionID)
       if (latestStep?.messageID) {
@@ -3168,11 +3190,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         return
       }
+      delivering = true
       await sendContinuation(
         sessionID,
         goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale),
         goal.lastPromptAgent ?? latestTurnAgent ?? null,
       )
+      delivering = false
       if (!lifecycleCurrent()) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
         return
@@ -3216,6 +3240,20 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         }
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID })
+        // A host rejection that is not transient will repeat on every retry, so
+        // stop the episode visibly instead of leaving an active goal idle.
+        if (delivering && isCurrent() && attemptGoalID != null) {
+          const paused = await pauseGoalForContinuationError(
+            sessionID,
+            error instanceof Error ? error.message : String(error),
+            attemptGoalID,
+          )
+          if (paused?.id === attemptGoalID && paused.status === "paused") {
+            cancelScheduledContinuation(sessionID)
+            restartAfterContinuation.delete(sessionID)
+            locallyDeliveredPendingSessions.delete(sessionID)
+          }
+        }
       }
       v2ErrorLog("Auto-continue failed", error)
     } finally {
@@ -3534,6 +3572,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       }
       case "session.deleted": {
         if (!sessionID) return
+        restartAfterContinuation.delete(sessionID)
         continuationEpochs.invalidate(sessionID)
         humanWaits.delete(sessionID)
         explicitResumeRequests.delete(sessionID)

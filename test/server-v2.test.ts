@@ -2949,24 +2949,80 @@ test("V2 watchdog uses the configured zh-CN locale for its rescue prompt", async
   await cleanup()
 })
 
-test("V2 non-transport prompt errors do not count toward the ceiling or retry", async () => {
+test("V2 non-transport prompt errors pause the goal without counting toward the ceiling", async () => {
   const mock = makeMockContext({
     auto_continue: true,
     min_continue_interval_seconds: 0,
     max_prompt_failures: 3,
   })
+  let attempts = 0
   mock.session.prompt = async () => {
-    throw new Error("invalid provider configuration")
+    attempts += 1
+    throw new Error("agent not found")
   }
   const cleanup = await setupPlugin(mock as never)
-  await createGoalViaV2Tool(mock, "non-transport must be ignored")
+  await createGoalViaV2Tool(mock, "non-transport must stop visibly")
 
   mock.stream.push({ type: "session.idle", created: Date.now(), data: { sessionID: "ses_v2" } })
-  await new Promise((resolve) => setTimeout(resolve, 100))
+  await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
 
-  const goal = await getGoal("ses_v2")
+  const goal = await getGoalInternal("ses_v2")
   expect(goal?.continuationFailures).toBe(0)
-  expect(goal?.status).toBe("active")
+  expect(goal?.autoTurns).toBe(0)
+  expect(goal?.pendingAttempt).toBeNull()
+  expect(goal?.stopReason).toBe("paused")
+  expect(goal?.blocker).toContain("agent not found")
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(attempts).toBe(1)
+
+  mock.stream.end()
+  await cleanup()
+})
+
+test("V2 settlement during a failing watchdog rescue is replayed and retried", async () => {
+  const mock = makeMockContext({
+    auto_continue: true,
+    min_continue_interval_seconds: 0,
+    max_turn_time: 0.02,
+    max_prompt_failures: 3,
+  })
+  let releaseRescue!: () => void
+  const rescueGate = new Promise<void>((resolve) => {
+    releaseRescue = resolve
+  })
+  let rescueStarted = false
+  let failuresAtRetry: number | undefined
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    if (mock.promptCalls.length === 1) {
+      rescueStarted = true
+      await rescueGate
+      throw new Error("network connection reset")
+    }
+    failuresAtRetry ??= (await getGoal("ses_v2"))?.continuationFailures
+    return { id: "pending_retry" }
+  }
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "rescue failure must not stall")
+
+  mock.stream.push({
+    type: "session.status",
+    created: Date.now(),
+    data: { sessionID: "ses_v2", status: { type: "busy" } },
+  })
+  await waitFor(() => rescueStarted)
+  // The execution settles while the rescue prompt is still in flight.
+  await mock.stream.push({
+    type: "session.execution.succeeded",
+    created: Date.now(),
+    data: { sessionID: "ses_v2" },
+  })
+  releaseRescue()
+
+  await waitFor(() => failuresAtRetry != null)
+  expect(mock.promptCalls.length).toBeGreaterThanOrEqual(2)
+  expect(failuresAtRetry).toBe(1)
+  expect((await getGoal("ses_v2"))?.status).toBe("active")
 
   mock.stream.end()
   await cleanup()
@@ -3026,11 +3082,8 @@ test("V2 watchdog no-response counts a failure on idle even with auto_continue f
   )
   await waitFor(() => mock.promptCalls.length === 1, 10_000)
   expect((await getGoal("ses_v2"))?.autoTurns).toBe(0)
-  // The rescue's state write is visible before the watchdog releases its
-  // continuation claim (the state lock is released after the write). An idle
-  // that lands inside that window is dropped while auto-continue is disabled
-  // (YAN-970), so let the rescue settle before ending the busy episode.
-  await new Promise((resolve) => setTimeout(resolve, 50))
+  // An idle landing while the rescue still holds its continuation claim is
+  // replayed once the claim is released (YAN-970), so no settle delay is needed.
 
   // The busy episode ends with no response: the started pending attempt counts
   // exactly one unresolved failure even though auto-continue is disabled, and
@@ -3044,6 +3097,51 @@ test("V2 watchdog no-response counts a failure on idle even with auto_continue f
   expect(goal?.status).toBe("active")
   expect((await getGoalInternal("ses_v2"))?.pendingAttempt).toBeNull()
   await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(mock.promptCalls).toHaveLength(1)
+
+  mock.stream.end()
+  await cleanup()
+})
+
+test("V2 settlement during a successful watchdog rescue does not fail the new rescue", async () => {
+  const mock = makeMockContext({
+    auto_continue: true,
+    min_continue_interval_seconds: 0,
+    max_turn_time: 0.02,
+    max_prompt_failures: 3,
+  })
+  let releaseRescue!: () => void
+  const rescueGate = new Promise<void>((resolve) => {
+    releaseRescue = resolve
+  })
+  let rescueStarted = false
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    rescueStarted = true
+    await rescueGate
+    return { id: "pending_rescue" }
+  }
+  const cleanup = await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "successful rescue must stay pending")
+
+  mock.stream.push({
+    type: "session.status",
+    created: Date.now(),
+    data: { sessionID: "ses_v2", status: { type: "busy" } },
+  })
+  await waitFor(() => rescueStarted)
+  await mock.stream.push({
+    type: "session.execution.succeeded",
+    created: Date.now(),
+    data: { sessionID: "ses_v2" },
+  })
+  releaseRescue()
+  await waitFor(async () => (await getGoalInternal("ses_v2"))?.pendingAttempt?.delivered === true)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  const goal = await getGoalInternal("ses_v2")
+  expect(goal?.continuationFailures).toBe(0)
+  expect(goal?.pendingAttempt?.started).toBe(false)
   expect(mock.promptCalls).toHaveLength(1)
 
   mock.stream.end()
