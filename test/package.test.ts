@@ -19,6 +19,9 @@ test("published tui entrypoint shares host runtime instances via peerDependencie
     // Local development keeps its own copies for typecheck and tests.
     expect(packageJson.devDependencies?.[dependency]).toBeString()
   }
+
+  // Dev-pinned OpenTUI must stay compatible with the host peer range.
+  expect(satisfies("0.5.16", packageJson.peerDependencies?.["@opentui/solid"] ?? "")).toBe(true)
 })
 
 test("engines.opencode covers the V2 beta line and the V1 floor while excluding older stable releases", () => {
@@ -36,5 +39,37 @@ test("engines.opencode covers the V2 beta line and the V1 floor while excluding 
   }
   for (const version of ["0.0.0", "0.0.1", "0.5.0", "1.0.0", "1.17.0"]) {
     expect(satisfies(version, range)).toBe(false)
+  }
+})
+
+test("@opencode devDependencies pin the same stable SDK version", () => {
+  const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
+    devDependencies?: Record<string, string>
+  }
+  // Derive the full set from package.json so future @opencode/* additions
+  // cannot silently drift from the shared pin.
+  const sdkPackages = Object.keys(packageJson.devDependencies ?? {}).filter((name) =>
+    name.startsWith("@opencode/"),
+  )
+  for (const required of ["client", "plugin", "schema", "theme"]) {
+    expect(sdkPackages).toContain(`@opencode/${required}`)
+  }
+  const versions = new Set(sdkPackages.map((name) => packageJson.devDependencies?.[name]))
+  expect([...versions]).toEqual(["2.0.25"])
+})
+
+test("workflows pin the OpenCode CLI to the SDK version", () => {
+  const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
+    devDependencies?: Record<string, string>
+  }
+  const sdkVersion = packageJson.devDependencies?.["@opencode/plugin"]
+  for (const file of [".github/workflows/ci.yml", ".github/workflows/publish.yml"]) {
+    const workflow = readFileSync(file, "utf8")
+    expect(workflow).toContain(`OPENCODE_CLI_VERSION: "${sdkVersion}"`)
+    expect(workflow).toContain("npm install -g @opencode/cli@${OPENCODE_CLI_VERSION}")
+    expect(workflow).toContain("opencode2 --version")
+    expect(workflow).toContain('test "$OBSERVED" = "opencode v${OPENCODE_CLI_VERSION}"')
+    expect(workflow).not.toContain("grep -F")
+    expect(workflow).not.toContain("@opencode/cli@beta")
   }
 })

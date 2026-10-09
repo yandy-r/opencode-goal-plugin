@@ -12,6 +12,9 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  OPENCODE_CLI_VERSION: "2.0.25"
+
 jobs:
   typecheck:
     name: Typecheck
@@ -75,7 +78,11 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - name: Install OpenCode V2
-        run: npm install -g @opencode/cli@beta
+        run: npm install -g @opencode/cli@${OPENCODE_CLI_VERSION}
+      - name: Assert OpenCode CLI version
+        run: |
+          OBSERVED="$(opencode2 --version)"
+          test "$OBSERVED" = "opencode v${OPENCODE_CLI_VERSION}"
       - run: bun run smoke:v2
         env:
           OPENCODE_SMOKE_TIMEOUT_MS: "120000"

@@ -8,6 +8,9 @@ updates:
       prefix: "build(deps)"
       prefix-development: "build(deps-dev)"
     groups:
+      opencode:
+        patterns:
+          - "@opencode/*"
       minor-and-patch:
         update-types: [minor, patch]
   - package-ecosystem: github-actions
