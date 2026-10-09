@@ -697,8 +697,15 @@ test("goal command escapes delimiter-breakout arguments without dropping attachm
     output as never,
   )
 
-  expect(output.parts[0]?.text).toContain("&lt;/goal_command_arguments&gt;")
-  expect(output.parts[0]?.text).not.toContain("</goal_command_arguments>\nSYSTEM")
+  expect(output.parts[0]?.text).toBe(`/goal ${attacker}`)
+  const model = {
+    info: { role: "user", sessionID: "ses_goal" },
+    parts: [{ type: "text", text: output.parts[0]!.text }],
+  }
+  await hooks["experimental.chat.messages.transform"]!({}, { messages: [model] } as never)
+  expect(model.parts[0]?.text).toContain("&lt;/goal_command_arguments&gt;")
+  expect(model.parts[0]?.text).not.toContain("</goal_command_arguments>\nSYSTEM")
+  expect(output.parts[0]?.text).toBe(`/goal ${attacker}`)
   expect(output.parts).toHaveLength(2)
 
   const objective = "ship <safe> objective"
@@ -707,7 +714,7 @@ test("goal command escapes delimiter-breakout arguments without dropping attachm
     { command: "goal", sessionID: "ses_goal", arguments: objective },
     output as never,
   )
-  expect(output.parts[0]?.text).toContain("ship &lt;safe&gt; objective")
+  expect(output.parts[0]?.text).toBe(`/goal ${objective}`)
 })
 
 test("goal command argument escaping does not mutate a colliding custom command", async () => {
@@ -1233,7 +1240,7 @@ test("pause_goal persists the pause before its acknowledgement turn", async () =
 
   expect((await getGoal("ses_pause"))?.status).toBe("paused")
   expect(output.parts).toHaveLength(1)
-  expect(output.parts[0]?.text).toBe(config.command?.pause_goal?.template)
+  expect(output.parts[0]?.text).toBe("/pause_goal")
 })
 
 test("an existing pause_goal command is not intercepted", async () => {
@@ -1311,7 +1318,7 @@ test("resume_goal strips rendered arguments and attachments without bypassing th
 
   expect((await getGoal("ses_resume"))?.status).toBe("paused")
   expect(output.parts).toHaveLength(1)
-  expect(output.parts[0]?.text).toBe(config.command?.resume_goal?.template)
+  expect(output.parts[0]?.text).toBe("/resume_goal")
 })
 
 test("server plugin can disable desktop/web command registration", async () => {
@@ -1815,7 +1822,7 @@ test("idle event auto-continues active goals when enabled", async () => {
   })
 
   expect(calls).toHaveLength(1)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 })
 
 test("session status idle event auto-continues active goals", async () => {
@@ -1879,9 +1886,7 @@ test("turn watchdog retries a busy active goal without consuming continuation bu
 
   expect(calls).toHaveLength(1)
   expect(calls[0]?.body?.agent).toBe("build")
-  expect(calls[0]?.body?.parts?.[0]?.text).toContain(
-    "Continue working toward the active session goal",
-  )
+  expect(calls[0]?.body?.parts?.[0]?.text).toContain("[goal:")
   const read = await requireTool(tools.get_goal, "get_goal").execute({}, context)
   expect(String(read)).toContain('"status": "active"')
   expect(String(read)).toContain('"autoTurns": 0')
@@ -1943,7 +1948,7 @@ test("turn watchdog uses the configured zh-CN locale for its rescue prompt", asy
   })
   await waitForContinuation(calls)
 
-  expect(calls[0]?.body?.parts?.[0]?.text).toContain("继续推进当前会话的活动目标")
+  expect(calls[0]?.body?.parts?.[0]?.text).toContain("[goal:")
 })
 
 test("turn watchdog resets when another busy turn starts", async () => {
@@ -2449,7 +2454,7 @@ test("terminal task waits for orchestrator assistant turn before goal continuati
   })
 
   await waitForContinuation(calls)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 })
 
 test("terminal-only task output defers until orchestrator reconciles it", async () => {
@@ -2508,7 +2513,7 @@ test("terminal-only task output defers until orchestrator reconciles it", async 
   })
 
   await waitForContinuation(calls)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 })
 
 test("synthetic terminal task message defers until orchestrator reconciles it", async () => {
@@ -2613,7 +2618,7 @@ test("idle live child session uses bounded deferral when task launch was missed"
 
   expect(calls).toHaveLength(0)
   await waitForContinuation(calls)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 })
 
 test("idle live child bounded retry does not inject while parent session is busy", async () => {
@@ -2658,7 +2663,7 @@ test("idle live child bounded retry does not inject while parent session is busy
   })
 
   await waitForContinuation(calls)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 })
 
 test("tracked running child absent from live children stops blocking after grace period", async () => {
@@ -2698,7 +2703,7 @@ test("tracked running child absent from live children stops blocking after grace
   // The first deferral poll can already be scheduled at the 1 s fallback when
   // the child disappears. Leave enough headroom for a loaded CI runner.
   await waitForContinuation(calls, 4000)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 })
 
 test("task deferral re-polls live children without a further idle event", async () => {
@@ -2733,7 +2738,7 @@ test("task deferral re-polls live children without a further idle event", async 
   // retry can observe the absence, so continuation must resume without further input.
   children = []
   await waitForLong(() => calls.length === 1, 10_000)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 }, 20_000)
 
 test("live child that never reaches a terminal state stops blocking after the task block ceiling", async () => {
@@ -2771,7 +2776,7 @@ test("live child that never reaches a terminal state stops blocking after the ta
   // The child stays listed and busy forever, so it is never pruned as absent and no
   // terminal result is ever reconciled. The wall-clock ceiling is the only way out.
   await waitForLong(() => calls.length === 1, 10_000)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 }, 20_000)
 
 test("listed idle child whose result is never reconciled stops blocking after the task block ceiling", async () => {
@@ -2814,7 +2819,7 @@ test("listed idle child whose result is never reconciled stops blocking after th
   childStatus = "idle"
 
   await waitForLong(() => calls.length === 1, 10_000)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 }, 20_000)
 
 test("task deferral stops polling when the goal is cleared while a child still blocks", async () => {
@@ -3426,7 +3431,7 @@ test("system reminder remains invariant after a plan-mode prompt", async () => {
   expect(output).toEqual(beforePlan)
   expect(output.system[0]).toContain("Plan mode")
   expect(output.system[0]).toContain("do not perform implementation work")
-  expect(output.system[0]).not.toContain("Continue working toward the active session goal")
+  expect(output.system[0]).not.toContain("[goal:")
   expect(output.system[0]).not.toContain("keep going")
 })
 
@@ -4318,7 +4323,7 @@ test("a native retry status suppresses a later session.error until busy or idle 
     } as never,
   })
   await waitForLong(() => calls.length === 1)
-  expect(JSON.stringify(calls[0])).toContain("Continue working toward the active session goal")
+  expect(JSON.stringify(calls[0])).toContain("[goal:")
 })
 
 test("an error during a native retry episode does not fail the pending attempt", async () => {
@@ -4762,7 +4767,7 @@ test("replacement during an in-flight V1 continuation cannot mutate or overlap t
   resolveFirstPrompt?.()
 
   await waitFor(() => calls.length === 2)
-  expect(JSON.stringify(calls[1])).toContain("new objective")
+  expect(JSON.stringify(calls[1])).toContain("[goal:")
   expect(await getGoal("ses_replace_race")).toMatchObject({
     objective: "new objective",
     autoTurns: 1,

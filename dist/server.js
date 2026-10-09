@@ -2934,7 +2934,7 @@ Do not create, edit, clear, complete, or mark a goal unmet.`;
 }
 function isExplicitResumePrompt(text, commandName, locale, messages) {
   const value = text.trim();
-  return value === goalStatusCommandTemplate("resume_goal", locale) || value === goalCommandTemplate(commandName, locale).replace("$ARGUMENTS", "resume") || value === messages.tui.resumePrompt;
+  return value === goalStatusCommandTemplate("resume_goal", locale) || value === goalCommandTemplate(commandName, locale).replace("$ARGUMENTS", "resume") || value === "/resume_goal" || value.toLowerCase() === `/${commandName} resume`.toLowerCase() || value === messages.tui.resumePrompt;
 }
 function goalCommandDefinitions(commandName, locale = "en-US") {
   const messages = messagesFor(locale);
@@ -2996,22 +2996,22 @@ function registerDesktopCommands(config, commandName, locale = "en-US") {
     };
   }
 }
-function sanitizeGoalStatusCommandParts(output, template) {
+function sanitizeGoalStatusCommandParts(output, template, visible) {
   const text = output.parts.find((part) => part.type === "text" && part.text?.startsWith(template));
   if (!text)
     return false;
-  text.text = template;
+  text.text = visible;
   output.parts.splice(0, output.parts.length, text);
   return true;
 }
-function escapeGoalCommandArguments(output, template, argumentsText) {
+function escapeGoalCommandArguments(output, template, visible) {
   const [prefix, suffix, extra] = template.split("$ARGUMENTS");
   if (prefix === undefined || suffix === undefined || extra !== undefined)
     return false;
   const text = output.parts.find((part) => part.type === "text" && part.text?.startsWith(prefix) && part.text.endsWith(suffix));
   if (!text)
     return false;
-  text.text = `${prefix}${escapeXmlText2(argumentsText)}${suffix}`;
+  text.text = visible;
   return true;
 }
 function textFromPart(part) {
@@ -3159,9 +3159,33 @@ async function sendContinuation(client, sessionID, prompt, agent) {
     path: { id: sessionID },
     body: {
       ...agent ? { agent } : {},
-      parts: [{ type: "text", text: prompt }]
+      parts: [{ type: "text", text: await compactContinuation(sessionID, prompt) }]
     }
   });
+}
+async function compactContinuation(sessionID, prompt) {
+  const goal = await getGoal(sessionID);
+  if (!goal)
+    return prompt;
+  return `[goal:${goal.id}] ${goal.status === "active" ? "continue" : "limit reached \u2014 wrap up"}`;
+}
+async function expandGoalTurn(sessionID, text, commandName, locale) {
+  const marker = /^\[goal:([^\]]+)\] (continue|limit reached \u2014 wrap up)$/.exec(text);
+  if (marker) {
+    const goal = await getGoal(sessionID);
+    if (!goal || goal.id !== marker[1])
+      return text;
+    return marker[2] === "continue" && goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale);
+  }
+  if (commandName === null)
+    return text;
+  const prefix = `/${commandName}`;
+  if (text === prefix || text.startsWith(`${prefix} `)) {
+    return goalCommandTemplate(commandName, locale).replaceAll("$ARGUMENTS", () => escapeXmlText2(text.slice(prefix.length).trim()));
+  }
+  if (text === "/pause_goal" || text === "/resume_goal")
+    return goalStatusCommandTemplate(text.slice(1), locale);
+  return text;
 }
 function isIdleEvent(event) {
   if (event.type === "session.idle")
@@ -4461,7 +4485,7 @@ var server = async ({ client }, options) => {
     },
     async "command.execute.before"(input, output) {
       if (input.command === commandName) {
-        const sanitized = escapeGoalCommandArguments(output, goalCommandTemplate(commandName, locale), input.arguments);
+        const sanitized = escapeGoalCommandArguments(output, goalCommandTemplate(commandName, locale), `/${commandName} ${input.arguments.trim()}`.trim());
         objectiveEdits.delete(input.sessionID);
         const edit = /^edit\s+([\s\S]+)$/i.exec(input.arguments.trim());
         const goal = edit && sanitized ? await getGoal(input.sessionID) : null;
@@ -4475,7 +4499,7 @@ var server = async ({ client }, options) => {
       if (input.command !== "pause_goal" && input.command !== "resume_goal")
         return;
       const template = goalStatusCommandTemplate(input.command, locale);
-      if (!sanitizeGoalStatusCommandParts(output, template))
+      if (!sanitizeGoalStatusCommandParts(output, template, `/${input.command}`))
         return;
       if (input.command === "resume_goal")
         explicitResumeRequests.add(input.sessionID);
@@ -4546,6 +4570,13 @@ var server = async ({ client }, options) => {
       const scheduled = scheduledContinuations.get(sessionID);
       if (observed.progressed && scheduled?.purpose !== "settle")
         cancelScheduledContinuation(sessionID);
+      const latest = output.messages.findLast((message) => message.info.role === "user");
+      const part = latest?.parts.find((entry) => entry.type === "text");
+      if (part?.type === "text") {
+        const expanded = await expandGoalTurn(sessionID, part.text.trim(), registerCommand ? commandName : null, locale);
+        if (expanded !== part.text.trim())
+          latest.parts = latest.parts.map((entry) => entry === part ? { ...part, text: expanded } : entry);
+      }
     },
     async "experimental.chat.system.transform"(input, output) {
       if (typeof input.sessionID !== "string")
@@ -4806,7 +4837,7 @@ async function setupV2(context) {
     markSessionOwnership(sessionID, true);
     await context.session.prompt({
       sessionID,
-      text: prompt,
+      text: await compactContinuation(sessionID, prompt),
       ...agent ? { agents: [{ name: agent }] } : {}
     });
   }
@@ -5582,7 +5613,7 @@ async function setupV2(context) {
               await context.session.prompt({
                 ...forwardedPrompt,
                 sessionID: input.sessionID,
-                text: command.template.replaceAll("$ARGUMENTS", () => escapeXmlText2(input.prompt.text.trim())),
+                text: `/${command.name}${command.action === "goal" && input.prompt.text.trim() ? ` ${input.prompt.text.trim()}` : ""}`,
                 delivery: input.delivery
               });
               admitted = true;
@@ -5704,9 +5735,21 @@ async function setupV2(context) {
       cancelScheduledContinuation(sessionID);
     }
   }));
-  registrations.push(await context.session.hook("context", (sessionContext) => {
+  registrations.push(await context.session.hook("context", async (sessionContext) => {
     const reminder = systemReminder(locale);
     pushSystemOnce(sessionContext.system, reminder, (text) => text.includes(reminder));
+    const messages = sessionContext.messages ?? [];
+    const index = messages.findLastIndex((message) => message.role === "user");
+    const message = messages[index];
+    const part = message?.content.find((entry) => entry.type === "text");
+    if (!message || part?.type !== "text")
+      return;
+    const expanded = await expandGoalTurn(sessionContext.sessionID, part.text.trim(), registerCommand ? commandName : null, locale);
+    if (expanded === part.text.trim())
+      return;
+    sessionContext.messages[index] = Object.assign(Object.create(Object.getPrototypeOf(message)), message, {
+      content: message.content.map((entry) => entry === part ? { ...part, text: expanded } : entry)
+    });
   }));
   registrations.push(await context.session.hook("compaction", async (event) => {
     const goal = await getGoal(event.sessionID);

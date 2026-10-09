@@ -14,6 +14,8 @@ const registryPackage = target.startsWith("@")
 const packagePath = registryPackage ? target : resolve(target)
 let modelCalls = 0
 let continuationCalls = 0
+let compactLeaks = 0
+let expandedContinuations = 0
 // Persisted goal fields the permission-wait smoke inspects.
 type SmokeGoal = {
   status: string
@@ -36,11 +38,20 @@ const model = Bun.serve({
     await writeFile(join(root, `model-request-${modelCalls}.json`), JSON.stringify(body))
     const messages = body.messages
     const last = messages.at(-1)
-    const continuationCount = messages.filter(
-      (message) =>
+    const fullContinuation = "Continue working toward the active session goal"
+    // Only the latest goal turn is expanded for the model; earlier ones stay compact markers.
+    const continuationCount = messages.filter((message) => {
+      const text = JSON.stringify(message.content)
+      return (
         message.role === "user" &&
-        JSON.stringify(message.content).includes("Continue working toward the active session goal"),
-    ).length
+        (text.includes(fullContinuation) || /\[goal:[^\]]+\] continue/.test(text))
+      )
+    }).length
+    if (continuationCount > 0 && last?.role === "user") {
+      const latestText = JSON.stringify(last.content)
+      if (/\[goal:[^\]]+\] continue/.test(latestText)) compactLeaks++
+      if (latestText.includes(fullContinuation)) expandedContinuations++
+    }
     const hasContinuation = continuationCount > 0
     if (hasContinuation) continuationCalls++
     const statusOnly =
@@ -364,6 +375,8 @@ try {
   )
   assert.equal(state!.goals[sessionID]!.autoTurns, 2)
   assert(continuationCalls > 0)
+  assert.equal(compactLeaks, 0, "model received a compact goal marker instead of the full prompt")
+  assert(expandedContinuations > 0, "model never received the expanded continuation prompt")
 
   // Real-host permission-wait smoke (local mode only). Registry mode installs
   // the published package, which cannot import this checkout's src/state.ts,
