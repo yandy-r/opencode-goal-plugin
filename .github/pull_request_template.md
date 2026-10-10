@@ -19,7 +19,7 @@
 - [ ] `bun run test` passes (new behavior has regression coverage)
 - [ ] `bun run lint` passes
 - [ ] `bun run typecheck` passes
-- [ ] `bun run build` passes and `dist/server.js` is committed if server code changed
+- [ ] `bun run build` passes (`dist/` is build output; do not commit it)
 - [ ] README/docs updated if behavior or options changed
 
 > Note: merging to `main` publishes a `dev` snapshot to npm; releases are cut by pushing a `vX.Y.Z` tag.
