@@ -62,7 +62,7 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.17.1",
-    "zod": "4.1.8",
+    "zod": "4.6.5",
     "effect-goal-state": "npm:effect@^3.21.2"
   },
   "peerDependencies": {
@@ -86,7 +86,7 @@
     "markdownlint-cli": "^0.49.1",
     "prettier": "^3.9.9",
     "semver": "^7.8.5",
-    "solid-js": "1.9.15",
+    "solid-js": "1.9.16",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-7": "npm:typescript@^7.0.2",
     "typescript-eslint": "^8.59.2"
