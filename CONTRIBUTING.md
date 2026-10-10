@@ -41,13 +41,13 @@ Useful scripts:
 2. Make your change, keeping the existing code style (no semicolons, 130-column lines, strict TypeScript).
 3. Add or update tests — behavior changes need regression coverage.
 4. Run the local gates: `bun run test && bun run lint && bun run typecheck && bun run build`.
-5. Commit the rebuilt `dist/server.js` when `src/server.ts` (or its imports) changed — the built file is tracked on purpose.
+5. Do not commit `dist/`: it is build output (gitignored). `prepare` builds it on install, and the publish workflow builds before publishing.
 6. Open a pull request against `main` describing the problem, the approach, and how you verified it. Link the related issue (`Closes #NN`) when one exists. The pull request description must also name the AI model and agent harness used (for example, OpenCode or Claude Code), or explicitly state that the change was made manually.
 
 ## CI and releases
 
 - Every pull request runs typecheck, lint, tests with coverage, and a build via GitHub Actions. All checks must pass before merge.
-- Every push to `main` re-runs the gates and, if green, automatically publishes a patch release to npm and creates a GitHub release. Merging a PR ships it — please keep `main` releasable.
+- Every push to `main` re-runs the gates and, if green, publishes a `dev` snapshot to npm (no git tag or GitHub release). Releases are cut by pushing a `vX.Y.Z` tag; see [`RELEASING.md`](RELEASING.md). Keep `main` releasable.
 
 ## Reporting bugs and requesting features
 

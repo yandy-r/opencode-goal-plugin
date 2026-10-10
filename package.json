@@ -53,6 +53,7 @@
     "clean": "rm -rf dist",
     "build": "bun run clean && bun build ./src/server.ts --outdir ./dist --target bun --external @opencode-ai/plugin --external effect-goal-state --external zod",
     "pack:dry-run": "npm pack --dry-run",
+    "prepare": "bun run build",
     "test": "bun test",
     "smoke:v2": "bun scripts/smoke-v2-lifecycle.ts",
     "test:coverage": "bun test --coverage",

@@ -451,7 +451,7 @@ function sanitizeGoalStatusCommandParts(
   return true
 }
 
-function escapeGoalCommandArguments(
+function collapseGoalCommandParts(
   output: { parts: Array<{ type: string; text?: string }> },
   template: string,
   visible: string,
@@ -636,23 +636,21 @@ function agentFromMessage(message: { info?: unknown } | undefined) {
 async function sendContinuation(
   client: Parameters<Plugin>[0]["client"],
   sessionID: string,
-  prompt: string,
+  goal: GoalSnapshot,
   agent?: string | null,
 ) {
   await client.session.promptAsync({
     path: { id: sessionID },
     body: {
       ...(agent ? { agent } : {}),
-      parts: [{ type: "text", text: await compactContinuation(sessionID, prompt) }],
+      parts: [{ type: "text", text: continuationMarker(goal) }],
     },
   })
 }
 
 // ponytail: reconstruct only the current turn from durable state; historical
 // markers stay compact. No transient map or higher-priority task injection.
-async function compactContinuation(sessionID: string, prompt: string) {
-  const goal = await getGoal(sessionID)
-  if (!goal) return prompt
+function continuationMarker(goal: GoalSnapshot) {
   return `[goal:${goal.id}] ${goal.status === "active" ? "continue" : "limit reached — wrap up"}`
 }
 
@@ -1947,7 +1945,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       await sendContinuation(
         client,
         sessionID,
-        continuationPrompt(current, locale),
+        current,
         current.lastPromptAgent ?? latestTurnAgent ?? null,
       )
       // Watchdog rescues are untracked retries: a delivered prompt arms the
@@ -2215,7 +2213,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       await sendContinuation(
         client,
         sessionID,
-        goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale),
+        goal,
         goal.lastPromptAgent ?? latestTurnAgent ?? null,
       )
       if (!lifecycleCurrent()) {
@@ -2528,7 +2526,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
     },
     async "command.execute.before"(input, output) {
       if (input.command === commandName) {
-        const sanitized = escapeGoalCommandArguments(
+        const sanitized = collapseGoalCommandParts(
           output,
           goalCommandTemplate(commandName, locale),
           `/${commandName} ${input.arguments.trim()}`.trim(),
@@ -2631,8 +2629,11 @@ const server: Plugin = async ({ client }, options?: Options) => {
       if (observed.progressed && scheduled?.purpose !== "settle")
         cancelScheduledContinuation(sessionID)
       const latest = output.messages.findLast((message) => message.info.role === "user")
-      const part = latest?.parts.find((entry) => entry.type === "text")
-      if (part?.type === "text") {
+      for (const message of output.messages) {
+        if (message.info.role !== "user") continue
+        const part = message.parts.find((entry) => entry.type === "text")
+        if (part?.type !== "text") continue
+        if (message !== latest && part.text.startsWith("[goal:")) continue
         const expanded = await expandGoalTurn(
           sessionID,
           part.text.trim(),
@@ -2640,7 +2641,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
           locale,
         )
         if (expanded !== part.text.trim())
-          latest!.parts = latest!.parts.map((entry) =>
+          message.parts = message.parts.map((entry) =>
             entry === part ? { ...part, text: expanded } : entry,
           )
       }
@@ -2960,12 +2961,12 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     return `${sessionID}\0${messageID}`
   }
 
-  async function sendContinuation(sessionID: string, prompt: string, agent?: string | null) {
+  async function sendContinuation(sessionID: string, goal: GoalSnapshot, agent?: string | null) {
     // Delivering a prompt for a session proves this instance owns it.
     markSessionOwnership(sessionID, true)
     await context.session.prompt({
       sessionID,
-      text: await compactContinuation(sessionID, prompt),
+      text: continuationMarker(goal),
       ...(agent ? { agents: [{ name: agent }] } : {}),
     })
   }
@@ -3044,7 +3045,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       watchdogRescuedSessions.add(sessionID)
       await sendContinuation(
         sessionID,
-        continuationPrompt(current, locale),
+        current,
         current.lastPromptAgent ?? latestStep?.agent ?? null,
       )
       // Watchdog rescues are untracked retries: a delivered prompt arms the
@@ -3355,11 +3356,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         return
       }
       delivering = true
-      await sendContinuation(
-        sessionID,
-        goal.status === "active" ? continuationPrompt(goal, locale) : limitPrompt(goal, locale),
-        goal.lastPromptAgent ?? latestTurnAgent ?? null,
-      )
+      await sendContinuation(sessionID, goal, goal.lastPromptAgent ?? latestTurnAgent ?? null)
       delivering = false
       if (!lifecycleCurrent()) {
         await settleUncurrentDelivery(sessionID, goal, attemptGoalID, attemptID)
@@ -4138,26 +4135,25 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       const reminder = systemReminder(locale)
       pushSystemOnce(sessionContext.system, reminder, (text) => text.includes(reminder))
       const messages = sessionContext.messages ?? []
-      const index = messages.findLastIndex((message) => message.role === "user")
-      const message = messages[index]
-      const part = message?.content.find((entry) => entry.type === "text")
-      if (!message || part?.type !== "text") return
-      const expanded = await expandGoalTurn(
-        sessionContext.sessionID,
-        part.text.trim(),
-        registerCommand ? commandName : null,
-        locale,
-      )
-      if (expanded === part.text.trim()) return
-      sessionContext.messages[index] = Object.assign(
-        Object.create(Object.getPrototypeOf(message)),
-        message,
-        {
+      const latest = messages.findLastIndex((message) => message.role === "user")
+      for (const [index, message] of messages.entries()) {
+        if (message.role !== "user") continue
+        const part = message.content.find((entry) => entry.type === "text")
+        if (part?.type !== "text") continue
+        if (index !== latest && part.text.startsWith("[goal:")) continue
+        const expanded = await expandGoalTurn(
+          sessionContext.sessionID,
+          part.text.trim(),
+          registerCommand ? commandName : null,
+          locale,
+        )
+        if (expanded === part.text.trim()) continue
+        messages[index] = Object.assign(Object.create(Object.getPrototypeOf(message)), message, {
           content: message.content.map((entry) =>
             entry === part ? { ...part, text: expanded } : entry,
           ),
-        },
-      )
+        })
+      }
     }),
   )
 
