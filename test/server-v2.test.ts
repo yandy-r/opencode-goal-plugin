@@ -3890,23 +3890,115 @@ test("V2 event stream stop leaves a non-active goal and its history unchanged", 
   await mock.commands
     .find((command) => command.name === "goal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "status" }, delivery: "steer" })
-  const before = JSON.stringify(await getGoalHistory("ses_v2"))
+  // sampledAt is the read time of each snapshot; every persisted field is compared.
+  const stable = async () =>
+    JSON.stringify(await getGoalHistory("ses_v2"), (key, value) =>
+      key === "sampledAt" ? undefined : value,
+    )
+  const before = await stable()
   mock.stream.end()
   await new Promise((resolve) => setTimeout(resolve, 100))
   expect((await getGoal("ses_v2"))?.status).toBe("complete")
-  expect(JSON.stringify(await getGoalHistory("ses_v2"))).toBe(before)
+  expect(await stable()).toBe(before)
 })
 
 test("V2 a stopped event stream pauses a waiting goal rather than polling forever", async () => {
   const mock = makeMockContext({ hold_command: true })
-  const context = { ...mock, session: { ...mock.session, wait: async () => {} } }
+  let release = () => {}
+  let waiting = false
+  const context = {
+    ...mock,
+    session: {
+      ...mock.session,
+      wait: () =>
+        new Promise<void>((resolve) => {
+          waiting = true
+          release = resolve
+        }),
+    },
+  }
   await setupPlugin(context as never)
   await createGoalViaV2Tool(mock, "Goal with event delivery")
-  mock.stream.end()
-  await mock.commands
+  const command = mock.commands
     .find((command) => command.name === "goal")!
     .execute({ sessionID: "ses_v2", prompt: { text: "Continue the goal" }, delivery: "steer" })
+  await waitFor(() => waiting)
+  mock.stream.end()
+  await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
+  release()
+  await command
   expect((await getGoal("ses_v2"))?.status).toBe("paused")
+})
+
+test("V2 rejects new pursuit before admission once the event stream has stopped", async () => {
+  const mock = makeMockContext()
+  await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "Goal with stopped event delivery")
+  mock.stream.end()
+  await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
+  const run = (name: string, text: string) =>
+    mock.commands
+      .find((command) => command.name === name)!
+      .execute({ sessionID: "ses_v2", prompt: { text }, delivery: "steer" })
+
+  await expect(run("goal", "Continue the goal")).rejects.toThrow("goal event stream stopped")
+  await expect(run("resume_goal", "")).rejects.toThrow("goal event stream stopped")
+  expect(mock.promptCalls).toHaveLength(0)
+
+  // Control commands stay available.
+  await run("goal", "status")
+  expect(mock.promptCalls).toHaveLength(1)
+})
+
+test("V2 pauses the goal when the event stream stops while a pursuit prompt is being admitted", async () => {
+  const mock = makeMockContext()
+  let release = () => {}
+  let admitting = false
+  mock.session.prompt = async (input) => {
+    mock.promptCalls.push(input)
+    admitting = true
+    await new Promise<void>((resolve) => {
+      release = resolve
+    })
+    return { id: "pending_1" }
+  }
+  await setupPlugin(mock as never)
+  await createGoalViaV2Tool(mock, "Stop racing admission")
+  const command = mock.commands
+    .find((command) => command.name === "goal")!
+    .execute({ sessionID: "ses_v2", prompt: { text: "Continue the goal" }, delivery: "steer" })
+  await waitFor(() => admitting)
+  mock.stream.end()
+  await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
+  // Simulate the admitted prompt resuming the goal after shutdown has paused it.
+  await setGoalStatus("ses_v2", "active")
+  release()
+  // The post-admission check must pause it again without throwing.
+  await command
+  expect((await getGoal("ses_v2"))?.status).toBe("paused")
+  expect(mock.promptCalls).toHaveLength(1)
+})
+
+test("V2 event stream stop pauses persisted active goals never observed, only in the owning location", async () => {
+  const location = { directory: "/work/current", workspaceID: "workspace-current" }
+  await createGoal("ses_other", "Owned by another location")
+  await createGoal("ses_unseen", "Persisted before this run, no events")
+  const mock = makeMockContext({}, [], {}, location, {
+    ses_unseen: { location },
+    ses_other: { location: { directory: "/work/other", workspaceID: "workspace-other" } },
+  })
+  await setupPlugin(mock as never)
+  mock.stream.end()
+  await waitFor(async () => (await getGoal("ses_unseen"))?.status === "paused")
+  expect((await getGoal("ses_other"))?.status).toBe("active")
+})
+
+test("V2 event stream stop pauses persisted active goals when the plugin has no location", async () => {
+  await createGoal("ses_unseen", "Persisted before this run, no events")
+  const mock = makeMockContext()
+  await setupPlugin(mock as never)
+  mock.stream.end()
+  await waitFor(async () => (await getGoal("ses_unseen"))?.status === "paused")
 })
 
 test("V2 plugin disposal ends a waiting command pursuit and keeps the goal active for reconnection", async () => {

@@ -3971,6 +3971,9 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
               const pursue =
                 command.action === "resume" ||
                 (command.action === "goal" && args !== "" && !controlOnly)
+              // Nothing drives autonomy once the event consumer is gone; refuse new
+              // pursuit before admission. Control commands (pause, status, ...) stay.
+              if (pursue && eventConsumerStopped) throw new Error("goal event stream stopped")
               const signal = abortController.signal
               let admitted = false
               let stopWaiting = () => {}
@@ -3989,6 +3992,9 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                   delivery: input.delivery,
                 })
                 admitted = true
+                // The stream may have stopped while the prompt was being admitted;
+                // the catch below stops autonomy and pauses the active goal.
+                if (pursue && eventConsumerStopped) throw new Error("goal event stream stopped")
                 // By default the command returns once the first prompt is admitted; the
                 // event consumer drives later cycles. hold_command keeps the command
                 // pending for every cycle (ACP/Zed clients need this).
@@ -4308,10 +4314,22 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         // Without the event consumer nothing drives autonomy, so an active goal
         // would read active but idle. Pause it visibly, even when no held command
         // is around to notice.
-        for (const [sessionID, owned] of sessionOwnership) {
-          if (!owned) continue
-          goalServices.stopAutonomy?.(sessionID)
+        // Enumerate persisted active goals, not just the ownership cache: a goal
+        // never observed this run is still ours when ownsSession resolves it
+        // (it also awaits any in-flight ownership lookup).
+        let activeSessions: { sessionID: string }[] = []
+        try {
+          activeSessions = await getActiveGoalSessions()
+        } catch (error) {
+          v2ErrorLog("Failed to list active goals after event stream stopped", error)
+        }
+        const sessionIDs = new Set(activeSessions.map((item) => item.sessionID))
+        for (const [sessionID, owned] of sessionOwnership) if (owned) sessionIDs.add(sessionID)
+        for (const sessionID of sessionIDs) {
           try {
+            if (!(await ownsSession(sessionID))) continue
+            if (disposed || abortController.signal.aborted) break
+            goalServices.stopAutonomy?.(sessionID)
             await pauseGoalForContinuationError(sessionID, "goal event stream stopped")
           } catch (error) {
             v2ErrorLog("Failed to pause goal after event stream stopped", error)
