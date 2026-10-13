@@ -72,6 +72,7 @@ type Options = {
   restricted_agents?: string[]
   allow_goal_execution_from_plan?: boolean
   max_objective_chars?: number
+  hold_command?: boolean
 }
 
 type CreateGoalArgs = {
@@ -3988,8 +3989,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
                   delivery: input.delivery,
                 })
                 admitted = true
-                // A goal command owns all its automatic execution cycles.
-                if (pursue) {
+                // By default the command returns once the first prompt is admitted; the
+                // event consumer drives later cycles. hold_command keeps the command
+                // pending for every cycle (ACP/Zed clients need this).
+                if (
+                  pursue &&
+                  options.hold_command === true &&
+                  typeof context.session.wait === "function"
+                ) {
                   let pursuedGoalID: string | undefined
                   do {
                     await Promise.race([
@@ -4296,7 +4303,21 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     } catch (error) {
       if (!abortController.signal.aborted) v2ErrorLog("V2 event consumer stopped", error)
     } finally {
-      if (!disposed && !abortController.signal.aborted) eventConsumerStopped = true
+      if (!disposed && !abortController.signal.aborted) {
+        eventConsumerStopped = true
+        // Without the event consumer nothing drives autonomy, so an active goal
+        // would read active but idle. Pause it visibly, even when no held command
+        // is around to notice.
+        for (const [sessionID, owned] of sessionOwnership) {
+          if (!owned) continue
+          goalServices.stopAutonomy?.(sessionID)
+          try {
+            await pauseGoalForContinuationError(sessionID, "goal event stream stopped")
+          } catch (error) {
+            v2ErrorLog("Failed to pause goal after event stream stopped", error)
+          }
+        }
+      }
     }
   })()
 
