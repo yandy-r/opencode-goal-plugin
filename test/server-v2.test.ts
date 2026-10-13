@@ -3860,7 +3860,11 @@ test("V2 default mode pauses an owned active goal when the event stream stops", 
   await createGoalViaV2Tool(mock, "Default-mode stream stop")
   await mock.commands
     .find((command) => command.name === "goal")!
-    .execute({ sessionID: "ses_v2", prompt: { text: "Default-mode stream stop" }, delivery: "steer" })
+    .execute({
+      sessionID: "ses_v2",
+      prompt: { text: "Default-mode stream stop" },
+      delivery: "steer",
+    })
   expect((await getGoal("ses_v2"))?.status).toBe("active")
   mock.stream.end()
   await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
