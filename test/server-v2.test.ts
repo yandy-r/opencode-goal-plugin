@@ -3934,20 +3934,23 @@ test("V2 rejects new pursuit before admission once the event stream has stopped"
   const mock = makeMockContext()
   await setupPlugin(mock as never)
   await createGoalViaV2Tool(mock, "Goal with stopped event delivery")
-  mock.stream.end()
-  await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
   const run = (name: string, text: string) =>
     mock.commands
       .find((command) => command.name === name)!
       .execute({ sessionID: "ses_v2", prompt: { text }, delivery: "steer" })
+  // A control command makes this instance observe (own) the session.
+  await run("goal", "status")
+  expect(mock.promptCalls).toHaveLength(1)
+  mock.stream.end()
+  await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
 
   await expect(run("goal", "Continue the goal")).rejects.toThrow("goal event stream stopped")
   await expect(run("resume_goal", "")).rejects.toThrow("goal event stream stopped")
-  expect(mock.promptCalls).toHaveLength(0)
+  expect(mock.promptCalls).toHaveLength(1)
 
   // Control commands stay available.
   await run("goal", "status")
-  expect(mock.promptCalls).toHaveLength(1)
+  expect(mock.promptCalls).toHaveLength(2)
 })
 
 test("V2 pauses the goal when the event stream stops while a pursuit prompt is being admitted", async () => {
@@ -3979,27 +3982,23 @@ test("V2 pauses the goal when the event stream stops while a pursuit prompt is b
   expect(mock.promptCalls).toHaveLength(1)
 })
 
-test("V2 event stream stop pauses persisted active goals never observed, only in the owning location", async () => {
-  const location = { directory: "/work/current", workspaceID: "workspace-current" }
-  await createGoal("ses_other", "Owned by another location")
-  await createGoal("ses_unseen", "Persisted before this run, no events")
-  const mock = makeMockContext({}, [], {}, location, {
-    ses_unseen: { location },
-    ses_other: { location: { directory: "/work/other", workspaceID: "workspace-other" } },
+for (const location of [
+  { directory: "/work/current", workspaceID: "workspace-current" },
+  undefined,
+]) {
+  test(`V2 stream stop leaves unobserved persisted goals active and pauses observed owned goals (${location ? "with location" : "without location"})`, async () => {
+    await createGoal("ses_unseen", "Persisted before this run, no events")
+    const mock = makeMockContext({}, [], {}, location)
+    await setupPlugin(mock as never)
+    await createGoalViaV2Tool(mock, "Observed owned goal")
+    await mock.commands
+      .find((command) => command.name === "goal")!
+      .execute({ sessionID: "ses_v2", prompt: { text: "Observed owned goal" }, delivery: "steer" })
+    mock.stream.end()
+    await waitFor(async () => (await getGoal("ses_v2"))?.status === "paused")
+    expect((await getGoal("ses_unseen"))?.status).toBe("active")
   })
-  await setupPlugin(mock as never)
-  mock.stream.end()
-  await waitFor(async () => (await getGoal("ses_unseen"))?.status === "paused")
-  expect((await getGoal("ses_other"))?.status).toBe("active")
-})
-
-test("V2 event stream stop pauses persisted active goals when the plugin has no location", async () => {
-  await createGoal("ses_unseen", "Persisted before this run, no events")
-  const mock = makeMockContext()
-  await setupPlugin(mock as never)
-  mock.stream.end()
-  await waitFor(async () => (await getGoal("ses_unseen"))?.status === "paused")
-})
+}
 
 test("V2 plugin disposal ends a waiting command pursuit and keeps the goal active for reconnection", async () => {
   const mock = makeMockContext({ hold_command: true })

@@ -4311,25 +4311,17 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
     } finally {
       if (!disposed && !abortController.signal.aborted) {
         eventConsumerStopped = true
-        // Without the event consumer nothing drives autonomy, so an active goal
-        // would read active but idle. Pause it visibly, even when no held command
-        // is around to notice.
-        // Enumerate persisted active goals, not just the ownership cache: a goal
-        // never observed this run is still ours when ownsSession resolves it
-        // (it also awaits any in-flight ownership lookup).
-        let activeSessions: { sessionID: string }[] = []
-        try {
-          activeSessions = await getActiveGoalSessions()
-        } catch (error) {
-          v2ErrorLog("Failed to list active goals after event stream stopped", error)
-        }
-        const sessionIDs = new Set(activeSessions.map((item) => item.sessionID))
-        for (const [sessionID, owned] of sessionOwnership) if (owned) sessionIDs.add(sessionID)
-        for (const sessionID of sessionIDs) {
+        // Without the event consumer nothing drives autonomy, so an observed
+        // active goal would read active but idle. Pause it visibly, even when no
+        // held command is around to notice. Only the ownership cache: goals this
+        // instance never observed were never driven by it, and the shared state
+        // file may hold live goals of sibling OpenCode processes that this
+        // instance must not pause.
+        for (const [sessionID, owned] of sessionOwnership) {
+          if (!owned) continue
+          if (disposed || abortController.signal.aborted) break
+          goalServices.stopAutonomy?.(sessionID)
           try {
-            if (!(await ownsSession(sessionID))) continue
-            if (disposed || abortController.signal.aborted) break
-            goalServices.stopAutonomy?.(sessionID)
             await pauseGoalForContinuationError(sessionID, "goal event stream stopped")
           } catch (error) {
             v2ErrorLog("Failed to pause goal after event stream stopped", error)
