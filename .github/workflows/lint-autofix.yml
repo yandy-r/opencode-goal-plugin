@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: lts/*
+          node-version: "24.22.1"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: bun install --frozen-lockfile
 
@@ -37,7 +37,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: lts/*
+          node-version: "24.22.1"
 
       - name: Apply formatters
         run: ./scripts/style.sh format
